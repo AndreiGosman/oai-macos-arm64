@@ -195,7 +195,7 @@ treats the brackets as a glob.
 ## The 26 patches
 
 All are on the `darwin-arm64` lineage over `2026.w39`; the series replays
-on the clean tag (78 files, 681 insertions, 121 deletions, 2 new files:
+on the clean tag (80 files, 1076 insertions, 121 deletions, 2 new files:
 `common/utils/darwin_compat.h` and `common/utils/oai_sem.h`). Each commit
 message states the symptom, the cause and the choice made. Grouped by what
 they do:
