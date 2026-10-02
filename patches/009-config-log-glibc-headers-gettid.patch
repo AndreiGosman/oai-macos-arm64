@@ -1,0 +1,236 @@
+From 6155bd8ac4186ccfaaa373312c44852395f788d2 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:32:25 +0300
+Subject: [PATCH] config, log: glibc headers under __linux__, thread id without
+ syscall
+
+The configuration and logging libraries, which every executable and
+every unit test link, did not compile on Darwin:
+
+  config_load_configmodule.h:79:3: error: unknown type name 'pthread_mutex_t'
+  log.c:20:10: fatal error: 'linux/prctl.h' file not found
+  log.c:572:72: error: use of undeclared identifier '__NR_gettid'
+  defs_common.h:24:10: fatal error: 'linux/sched.h' file not found
+
+config_load_configmodule.h uses pthread_mutex_t without including
+<pthread.h>; glibc happened to pull it in. log.c includes linux/prctl.h
+and does not call prctl(); the eight files that include linux/sched.h
+use nothing from it that <sched.h> does not declare. Keep those includes
+under __linux__.
+
+The thread id in log lines came from syscall(__NR_gettid), which only
+Linux has. utils.h now provides oai_gettid(): the same syscall on Linux,
+pthread_threadid_np() on Darwin. The three log sites use it.
+---
+ common/config/config_load_configmodule.h |  1 +
+ common/utils/LOG/log.c                   |  4 +++-
+ common/utils/utils.h                     | 15 +++++++++++++++
+ executables/lte-enb.c                    |  2 +-
+ executables/lte-ru.c                     |  4 +++-
+ executables/lte-softmodem.h              |  2 ++
+ executables/nr-ru.c                      |  2 ++
+ executables/nr-softmodem-common.h        |  2 ++
+ executables/ru_control.c                 |  2 ++
+ openair1/PHY/defs_UE.h                   |  2 ++
+ openair1/PHY/defs_common.h               |  2 ++
+ openair1/PHY/defs_eNB.h                  |  2 ++
+ 12 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/common/config/config_load_configmodule.h b/common/config/config_load_configmodule.h
+index 923f868..861774f 100644
+--- a/common/config/config_load_configmodule.h
++++ b/common/config/config_load_configmodule.h
+@@ -18,6 +18,7 @@ extern "C" {
+ #include <stdlib.h>
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <pthread.h>
+ #include "common/config/config_paramdesc.h"
+ #define CONFIG_MAX_OOPT_PARAMS    10     // maximum number of parameters in the -O option (-O <cfgmode>:P1:P2...
+ #define CONFIG_MAX_ALLOCATEDPTRS  32768   // maximum number of parameters that can be dynamicaly allocated in the config module
+diff --git a/common/utils/LOG/log.c b/common/utils/LOG/log.c
+index 0592f6f..caaa3b3 100644
+--- a/common/utils/LOG/log.c
++++ b/common/utils/LOG/log.c
+@@ -17,7 +17,9 @@
+ 
+ #include <pthread.h>
+ #include <string.h>
++#ifdef __linux__
+ #include <linux/prctl.h>
++#endif
+ #include "common/config/config_userapi.h"
+ #include <time.h>
+ #include <sys/time.h>
+@@ -567,7 +569,7 @@ static inline int log_header(log_component_t *c, char *log_buffer, int buffsize,
+ 
+   char threadIdString[32];
+   if (flag & FLAG_THREAD_ID) {
+-    snprintf(threadIdString, sizeof(threadIdString), "%08lx ", syscall(__NR_gettid));
++    snprintf(threadIdString, sizeof(threadIdString), "%08lx ", oai_gettid());
+   } else {
+     threadIdString[0] = 0;
+   }
+diff --git a/common/utils/utils.h b/common/utils/utils.h
+index 03acacc..2dc1a3e 100644
+--- a/common/utils/utils.h
++++ b/common/utils/utils.h
+@@ -26,6 +26,21 @@ static inline void *memalign(size_t alignment, size_t size)
+ #else
+ #include <malloc.h>
+ #endif
++
++/* Kernel id of the calling thread, for log lines. */
++#include <pthread.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++static inline long oai_gettid(void)
++{
++#ifdef __APPLE__
++  uint64_t tid = 0;
++  pthread_threadid_np(NULL, &tid);
++  return (long)tid;
++#else
++  return syscall(__NR_gettid);
++#endif
++}
+ #include <common/utils/assertions.h>
+ 
+ #ifdef MALLOC_TRACE
+diff --git a/executables/lte-enb.c b/executables/lte-enb.c
+index 9bdb5f1..45f1734 100644
+--- a/executables/lte-enb.c
++++ b/executables/lte-enb.c
+@@ -343,7 +343,7 @@ static void *L1_thread( void *param ) {
+ #else
+   thread_top_init(thread_name);
+ #endif
+-  LOG_I(PHY,"thread rxtx created id=%ld\n", syscall(__NR_gettid));
++  LOG_I(PHY,"thread rxtx created id=%ld\n", oai_gettid());
+ 
+   while (!oai_exit) {
+     VCD_SIGNAL_DUMPER_DUMP_FUNCTION_BY_NAME( VCD_SIGNAL_DUMPER_FUNCTIONS_eNB_PROC_RXTX0, 0 );
+diff --git a/executables/lte-ru.c b/executables/lte-ru.c
+index a124414..7effc33 100644
+--- a/executables/lte-ru.c
++++ b/executables/lte-ru.c
+@@ -15,7 +15,9 @@
+ #include <sys/types.h>
+ #include <sys/mman.h>
+ #include <sched.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
+@@ -1522,7 +1524,7 @@ static void *ru_thread( void *param ) {
+   //CPU_SET(1, &cpuset);
+   //pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+   pthread_setname_np( pthread_self(),"ru thread");
+-  LOG_I(PHY,"thread ru created id=%ld\n", syscall(__NR_gettid));
++  LOG_I(PHY,"thread ru created id=%ld\n", oai_gettid());
+   LOG_I(PHY,"Starting RU %d (%s,%s),\n", ru->idx, NB_functions[ru->function], NB_timing[ru->if_timing]);
+ 
+   if (ru->has_ctrl_prt == 0) {
+diff --git a/executables/lte-softmodem.h b/executables/lte-softmodem.h
+index b99063f..0da8b6d 100644
+--- a/executables/lte-softmodem.h
++++ b/executables/lte-softmodem.h
+@@ -9,7 +9,9 @@
+ #include <execinfo.h>
+ #include <fcntl.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <sched.h>
+ #include <signal.h>
+ #include <stdint.h>
+diff --git a/executables/nr-ru.c b/executables/nr-ru.c
+index 8b34668..8119fe7 100644
+--- a/executables/nr-ru.c
++++ b/executables/nr-ru.c
+@@ -8,7 +8,9 @@
+ #include <unistd.h>
+ #include <string.h>
+ #include <sched.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #ifdef __linux__
+ #include <sys/sysinfo.h>
+ #endif
+diff --git a/executables/nr-softmodem-common.h b/executables/nr-softmodem-common.h
+index e2c1e96..8c73b79 100644
+--- a/executables/nr-softmodem-common.h
++++ b/executables/nr-softmodem-common.h
+@@ -12,7 +12,9 @@
+ #include <execinfo.h>
+ #include <fcntl.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <sched.h>
+ #include <signal.h>
+ #include <stdint.h>
+diff --git a/executables/ru_control.c b/executables/ru_control.c
+index abfdf6b..5f723b0 100644
+--- a/executables/ru_control.c
++++ b/executables/ru_control.c
+@@ -13,7 +13,9 @@
+ #include <sys/types.h>
+ #include <sys/mman.h>
+ #include <sched.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
+diff --git a/openair1/PHY/defs_UE.h b/openair1/PHY/defs_UE.h
+index b0ca22f..8be6762 100644
+--- a/openair1/PHY/defs_UE.h
++++ b/openair1/PHY/defs_UE.h
+@@ -18,7 +18,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/types.h>
+ #include <sys/mman.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
+diff --git a/openair1/PHY/defs_common.h b/openair1/PHY/defs_common.h
+index 6a4a2df..9a80dca 100644
+--- a/openair1/PHY/defs_common.h
++++ b/openair1/PHY/defs_common.h
+@@ -21,7 +21,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/types.h>
+ #include <sys/mman.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
+diff --git a/openair1/PHY/defs_eNB.h b/openair1/PHY/defs_eNB.h
+index 1cdce6e..d9cd21f 100644
+--- a/openair1/PHY/defs_eNB.h
++++ b/openair1/PHY/defs_eNB.h
+@@ -15,7 +15,9 @@
+ 
+ #include <execinfo.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <linux/sched.h>
++#endif
+ #include <stdlib.h>
+ #include <math.h>
+ #include <pthread.h>
+-- 
+2.55.0
+

@@ -1,0 +1,136 @@
+From bb558e793b8e2673ede8e45fc74015e247bc1b8b Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:06:26 +0300
+Subject: [PATCH] utils: recvmmsg, sysinfo and pthread_mutex_timedlock on
+ Darwin
+
+Three more glibc interfaces reached by the GTP-U receiver, the nFAPI
+transport, the record player and the LTE radio unit:
+
+  gtp_itf.cpp:1592: recvmmsg(h, msgs, VLEN, MSG_WAITFORONE, NULL)
+  record_player.c:29:20: error: variable has incomplete type 'struct sysinfo'
+  nfapi_lte_vnf.c:244:7: error: call to undeclared function 'pthread_mutex_timedlock'
+
+darwin_compat.h provides recvmmsg() and sendmmsg() over recvmsg() and
+sendmsg(), with MSG_WAITFORONE blocking on the first message only, as on
+Linux; sysinfo() with the one field the record player reads, totalram,
+from the hw.memsize sysctl; and pthread_mutex_timedlock() over
+pthread_mutex_trylock() and short sleeps, with the absolute CLOCK_REALTIME
+deadline and ETIMEDOUT of the POSIX call.
+---
+ common/utils/darwin_compat.h | 92 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+
+diff --git a/common/utils/darwin_compat.h b/common/utils/darwin_compat.h
+index 8a915fc..1ac7f34 100644
+--- a/common/utils/darwin_compat.h
++++ b/common/utils/darwin_compat.h
+@@ -104,6 +104,11 @@ static inline int clock_nanosleep(clockid_t clock_id, int flags, const struct ti
+   return 0;
+ }
+ 
++/* CLOCK_BOOTTIME is Linux; the softmodem uses it for its run time report. */
++#ifndef CLOCK_BOOTTIME
++#define CLOCK_BOOTTIME CLOCK_MONOTONIC
++#endif
++
+ /* The <endian.h> byte-order functions over libkern/OSByteOrder.h. */
+ #include <libkern/OSByteOrder.h>
+ #define htobe16(x) OSSwapHostToBigInt16(x)
+@@ -119,6 +124,93 @@ static inline int clock_nanosleep(clockid_t clock_id, int flags, const struct ti
+ #define le32toh(x) OSSwapLittleToHostInt32(x)
+ #define le64toh(x) OSSwapLittleToHostInt64(x)
+ 
++/* recvmmsg(2) and sendmmsg(2) over recvmsg(2) and sendmsg(2). With
++ * MSG_WAITFORONE the first receive blocks as requested and the following
++ * ones do not, which is the Linux semantics of that flag. */
++#include <sys/socket.h>
++struct mmsghdr {
++  struct msghdr msg_hdr;
++  unsigned int msg_len;
++};
++#define MSG_WAITFORONE 0x10000
++static inline int recvmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags, struct timespec *timeout)
++{
++  (void)timeout;
++  int recv_flags = flags & ~MSG_WAITFORONE;
++  unsigned int n = 0;
++  while (n < vlen) {
++    ssize_t len = recvmsg(fd, &msgvec[n].msg_hdr, recv_flags);
++    if (len < 0) {
++      if (n > 0)
++        break;
++      return -1;
++    }
++    msgvec[n].msg_len = (unsigned int)len;
++    n++;
++    if (flags & MSG_WAITFORONE)
++      recv_flags |= MSG_DONTWAIT;
++  }
++  return (int)n;
++}
++static inline int sendmmsg(int fd, struct mmsghdr *msgvec, unsigned int vlen, int flags)
++{
++  unsigned int n = 0;
++  while (n < vlen) {
++    ssize_t len = sendmsg(fd, &msgvec[n].msg_hdr, flags);
++    if (len < 0) {
++      if (n > 0)
++        break;
++      return -1;
++    }
++    msgvec[n].msg_len = (unsigned int)len;
++    n++;
++  }
++  return (int)n;
++}
++
++/* pthread_mutex_timedlock() over pthread_mutex_trylock() and short sleeps,
++ * with the POSIX contract: the deadline is absolute on CLOCK_REALTIME and
++ * the result is ETIMEDOUT once it has passed. */
++static inline int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime)
++{
++  for (;;) {
++    int ret = pthread_mutex_trylock(mutex);
++    if (ret != EBUSY)
++      return ret;
++    struct timespec now;
++    clock_gettime(CLOCK_REALTIME, &now);
++    if (now.tv_sec > abstime->tv_sec || (now.tv_sec == abstime->tv_sec && now.tv_nsec >= abstime->tv_nsec))
++      return ETIMEDOUT;
++    struct timespec pause = {0, 100000}; /* 100 us */
++    nanosleep(&pause, NULL);
++  }
++}
++
++/* sysinfo() from glibc <sys/sysinfo.h>, with the field OAI reads. */
++#include <sys/sysctl.h>
++struct sysinfo {
++  unsigned long totalram;
++  unsigned int mem_unit;
++};
++static inline int sysinfo(struct sysinfo *info)
++{
++  uint64_t memsize = 0;
++  size_t len = sizeof(memsize);
++  if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) != 0)
++    return -1;
++  info->totalram = (unsigned long)memsize;
++  info->mem_unit = 1;
++  return 0;
++}
++
++/* explicit_bzero() from glibc and the BSDs: a clear the optimiser keeps. */
++static inline void explicit_bzero(void *ptr, size_t len)
++{
++  volatile unsigned char *p = (volatile unsigned char *)ptr;
++  while (len--)
++    *p++ = 0;
++}
++
+ /* get_nprocs() from glibc <sys/sysinfo.h>. */
+ static inline int get_nprocs(void)
+ {
+-- 
+2.55.0
+

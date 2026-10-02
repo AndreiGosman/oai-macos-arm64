@@ -1,0 +1,46 @@
+From 222a603d06ec96c9c9f49cd9a198e3d8786437dd Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 13:28:53 +0300
+Subject: [PATCH] build: let modules resolve host symbols at load time on
+ Darwin
+
+The configuration, DFT, LDPC and radio modules are MODULE libraries
+loaded with dlopen() that call back into the executable: exit_function,
+end_configmodule, the logging and configuration entry points. The
+executable exports them with -rdynamic. GNU ld leaves such references
+undefined in a shared object by default and the dynamic loader binds
+them at load time. ld64 refuses them:
+
+  Undefined symbols for architecture arm64:
+    "_end_configmodule", referenced from:
+        _config_libconfig_get in config_libconfig.c.o
+    "_exit_function", referenced from:
+        _OUTLINED_FUNCTION_4 in config_common.c.o
+
+-Wl,-undefined,dynamic_lookup gives ld64 the GNU ld behaviour for MODULE
+and SHARED libraries on APPLE.
+---
+ CMakeLists.txt | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97da799..286d257 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -245,6 +245,13 @@ endif()
+ # the compiler flags, which ld64 rejects at link time.
+ if(APPLE)
+   string(REPLACE " -lgcc -lrt" "" C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR}")
++  # The configuration, DFT, LDPC and radio modules are loaded with dlopen()
++  # and call back into the executable (exit_function, end_configmodule, the
++  # logging and config entry points), which -rdynamic exports for them. GNU
++  # ld leaves such references undefined in a shared object by default; ld64
++  # refuses them unless told to resolve them at load time.
++  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-undefined,dynamic_lookup")
++  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,dynamic_lookup")
+   set(LINK_GROUP_START "")
+   set(LINK_GROUP_END "")
+   set(OAI_LIBRT "")
+-- 
+2.55.0
+

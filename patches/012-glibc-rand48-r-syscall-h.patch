@@ -1,0 +1,217 @@
+From 55cea1ee757baef890d3fe0584cf1bf563927b24 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:50:34 +0300
+Subject: [PATCH] sim, coding: rand48 with explicit state, sys/syscall.h not
+ syscall.h
+
+Two glibc-only spellings that no other libc has:
+
+  taus.c:31:23: error: variable has incomplete type 'struct drand48_data'
+  taus.c:40:5: error: call to undeclared function 'srand48_r'
+  nrLDPC_coding_segment_decoder.c:20:10: fatal error: 'syscall.h' file not found
+
+set_taus_seed() used the glibc reentrant srand48_r() and mrand48_r() so
+that seeding the Tausworthe generator does not disturb the process-wide
+rand48 state. POSIX jrand48() takes the 48-bit state explicitly and
+returns the same values when the state is seeded the way srand48() does
+(0x330E in the low word, the 32-bit seed above it), so every seed gives
+the same sequence as before on glibc as well.
+
+<syscall.h> is the glibc shortcut for <sys/syscall.h>; the eleven files
+that include it get the portable name.
+---
+ executables/lte-softmodem.h                   |  2 +-
+ executables/nr-softmodem-common.h             |  2 +-
+ .../nrLDPC_coding_segment_decoder_cuda.c      |  2 +-
+ .../nrLDPC_coding_segment_encoder_cuda.c      |  2 +-
+ .../nrLDPC_coding_ors/nrLDPC_coding_xdma.c    |  2 +-
+ .../nrLDPC_coding_segment_decoder.c           |  2 +-
+ .../nrLDPC_coding_segment_encoder.c           |  2 +-
+ openair1/PHY/LTE_TRANSPORT/dlsch_coding.c     |  2 +-
+ openair1/PHY/LTE_TRANSPORT/ulsch_decoding.c   |  2 +-
+ openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c   |  2 +-
+ openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c |  2 +-
+ openair1/SIMULATION/TOOLS/taus.c              | 19 ++++++++-----------
+ 12 files changed, 19 insertions(+), 22 deletions(-)
+
+diff --git a/executables/lte-softmodem.h b/executables/lte-softmodem.h
+index 0da8b6d..475c99f 100644
+--- a/executables/lte-softmodem.h
++++ b/executables/lte-softmodem.h
+@@ -18,7 +18,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+diff --git a/executables/nr-softmodem-common.h b/executables/nr-softmodem-common.h
+index 8c73b79..cad1776 100644
+--- a/executables/nr-softmodem-common.h
++++ b/executables/nr-softmodem-common.h
+@@ -21,7 +21,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_decoder_cuda.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_decoder_cuda.c
+index 1da677e..9245d9b 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_decoder_cuda.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_decoder_cuda.c
+@@ -15,7 +15,7 @@
+ 
+ #include <stdalign.h>
+ #include <stdint.h>
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include <time.h>
+ #include <pthread.h>
+ #include <cuda_runtime.h>
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_encoder_cuda.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_encoder_cuda.c
+index 7570b2f..a652483 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_encoder_cuda.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_cuda/nrLDPC_coding_segment_encoder_cuda.c
+@@ -12,7 +12,7 @@
+ #include "openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+ #include "common/utils/LOG/log.h"
+ 
+-#include <syscall.h>
++#include <sys/syscall.h>
+ 
+ //#define DEBUG_LDPC_ENCODING
+ //#define DEBUG_LDPC_ENCODING_FREE 1
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_ors/nrLDPC_coding_xdma.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_ors/nrLDPC_coding_xdma.c
+index c587406..ed7c0e3 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_ors/nrLDPC_coding_xdma.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_ors/nrLDPC_coding_xdma.c
+@@ -8,7 +8,7 @@
+  */
+ 
+ // [from gNB coding]
+-#include <syscall.h>
++#include <sys/syscall.h>
+ 
+ #include <nr_rate_matching.h>
+ #include "PHY/CODING/coding_defs.h"
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c
+index 7482075..0c24eec 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c
+@@ -17,7 +17,7 @@
+ 
+ #include <stdalign.h>
+ #include <stdint.h>
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include <time.h>
+ // #define gNB_DEBUG_TRACE
+ 
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
+index 72c09bb..b1433f6 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
+@@ -15,7 +15,7 @@
+ #include "common/utils/nr/nr_common.h"
+ #include <openair2/UTIL/OPT/opt.h>
+ 
+-#include <syscall.h>
++#include <sys/syscall.h>
+ 
+ #define DEBUG_LDPC_ENCODING
+ //#define DEBUG_LDPC_ENCODING_FREE 1
+diff --git a/openair1/PHY/LTE_TRANSPORT/dlsch_coding.c b/openair1/PHY/LTE_TRANSPORT/dlsch_coding.c
+index 43b4117..f62ac9c 100644
+--- a/openair1/PHY/LTE_TRANSPORT/dlsch_coding.c
++++ b/openair1/PHY/LTE_TRANSPORT/dlsch_coding.c
+@@ -17,7 +17,7 @@
+ #include "common/utils/LOG/vcd_signal_dumper.h"
+ #include "common/utils/LOG/log.h"
+ #include "executables/lte-softmodem.h"
+-#include <syscall.h>
++#include <sys/syscall.h>
+ 
+ //#define DEBUG_DLSCH_CODING
+ //#define DEBUG_DLSCH_FREE 1
+diff --git a/openair1/PHY/LTE_TRANSPORT/ulsch_decoding.c b/openair1/PHY/LTE_TRANSPORT/ulsch_decoding.c
+index e0208e8..07bbf8d 100644
+--- a/openair1/PHY/LTE_TRANSPORT/ulsch_decoding.c
++++ b/openair1/PHY/LTE_TRANSPORT/ulsch_decoding.c
+@@ -8,7 +8,7 @@
+ 
+ //#define DEBUG_ULSCH_DECODING
+ 
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include "PHY/defs_eNB.h"
+ #include "PHY/phy_extern.h"
+ #include "PHY/CODING/coding_extern.h"
+diff --git a/openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c b/openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c
+index a875d0d..75dc49f 100644
+--- a/openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c
++++ b/openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c
+@@ -18,7 +18,7 @@
+ #include "SCHED_NR/sched_nr.h"
+ #include "common/utils/LOG/log.h"
+ #include "common/utils/nr/nr_common.h"
+-#include <syscall.h>
++#include <sys/syscall.h>
+ #include <openair2/UTIL/OPT/opt.h>
+ 
+ #ifdef LDPC_CUDA
+diff --git a/openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c b/openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
+index f00a996..5ac5aa2 100644
+--- a/openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
++++ b/openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
+@@ -22,7 +22,7 @@
+ #include "defs.h"
+ #include "bits.h"
+ #include "common/utils/LOG/log.h"
+-#include <syscall.h>
++#include <sys/syscall.h>
+ // #define DEBUG_ULSCH_DECODING
+ // #define gNB_DEBUG_TRACE
+ 
+diff --git a/openair1/SIMULATION/TOOLS/taus.c b/openair1/SIMULATION/TOOLS/taus.c
+index 6bcbad7..789a2af 100644
+--- a/openair1/SIMULATION/TOOLS/taus.c
++++ b/openair1/SIMULATION/TOOLS/taus.c
+@@ -28,22 +28,19 @@ unsigned int taus(void)
+ void set_taus_seed(unsigned int seed_init)
+ {
+ 
+-  struct drand48_data buffer;
+-  unsigned long result = 0;
+-
+   if (seed_init == 0) {
+     fill_random(&s0, sizeof(s0));
+     fill_random(&s1, sizeof(s1));
+     fill_random(&s2, sizeof(s2));
+   } else {
+-    /* Use reentrant version of rand48 to ensure that no conflicts with other generators occur */
+-    srand48_r((long int)seed_init, &buffer);
+-    mrand48_r(&buffer, (long int *)&result);
+-    s0 = result;
+-    mrand48_r(&buffer, (long int *)&result);
+-    s1 = result;
+-    mrand48_r(&buffer, (long int *)&result);
+-    s2 = result;
++    /* rand48 with its own state, so that no conflicts with other generators
++     * occur. jrand48() over this state gives the sequence that srand48_r()
++     * and mrand48_r() gave: srand48() seeds the 48-bit state with 0x330E in
++     * the low word and the 32-bit seed above it. */
++    unsigned short xsubi[3] = {0x330E, (unsigned short)seed_init, (unsigned short)(seed_init >> 16)};
++    s0 = (unsigned int)jrand48(xsubi);
++    s1 = (unsigned int)jrand48(xsubi);
++    s2 = (unsigned int)jrand48(xsubi);
+   }
+ }
+ 
+-- 
+2.55.0
+

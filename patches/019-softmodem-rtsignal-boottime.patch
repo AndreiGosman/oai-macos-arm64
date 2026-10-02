@@ -1,0 +1,51 @@
+From f533e22475d42bf20fffaed84008e05b648a6afa Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:19:29 +0300
+Subject: [PATCH] softmodem: resource report signal and run-time clock without
+ Linux
+
+  softmodem-common.c:163:17: error: use of undeclared identifier 'CLOCK_BOOTTIME'
+  softmodem-common.c:197:27: error: use of undeclared identifier 'SIGRTMIN'
+
+The signal that prints the resource usage report is SIGRTMIN+1; where
+there are no real-time signals it is SIGUSR1, and the start-up message
+names whichever applies. The run time report reads CLOCK_BOOTTIME, which
+darwin_compat.h maps to CLOCK_MONOTONIC: the report is an elapsed time,
+and the difference between the two clocks is time spent asleep.
+---
+ executables/softmodem-common.c | 2 +-
+ executables/softmodem-common.h | 4 ++++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/executables/softmodem-common.c b/executables/softmodem-common.c
+index 4c3390c..3e66eca 100644
+--- a/executables/softmodem-common.c
++++ b/executables/softmodem-common.c
+@@ -215,7 +215,7 @@ void set_softmodem_sighandler(void) {
+   // Enable for clean exit on CTRL-C (i.e. record player, USRP...) 
+   signal(SIGINT,  signal_handler);
+   # if 0
+-  printf("Send signal %d to display resource usage...\n",SIGRTMIN+1);
++  printf("Send signal %d to display resource usage...\n",SOFTMODEM_RTSIGNAL);
+   signal(SIGSEGV, signal_handler);
+   signal(SIGTERM, signal_handler);
+   signal(SIGABRT, signal_handler);
+diff --git a/executables/softmodem-common.h b/executables/softmodem-common.h
+index 7cbbdf3..2041758 100644
+--- a/executables/softmodem-common.h
++++ b/executables/softmodem-common.h
+@@ -303,7 +303,11 @@ void softmodem_verify_mode(const softmodem_params_t *p);
+ softmodem_params_t *get_softmodem_params(void);
+ void get_common_options(configmodule_interface_t *cfg);
+ char *get_softmodem_function(void);
++#ifdef SIGRTMIN
+ #define SOFTMODEM_RTSIGNAL  (SIGRTMIN+1)
++#else /* no real-time signals: the resource usage report answers SIGUSR1 */
++#define SOFTMODEM_RTSIGNAL  SIGUSR1
++#endif
+ void set_softmodem_sighandler(void);
+ extern uint64_t downlink_frequency[MAX_NUM_CCs][4];
+ extern int64_t uplink_frequency_offset[MAX_NUM_CCs][4];
+-- 
+2.55.0
+

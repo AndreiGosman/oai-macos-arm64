@@ -1,0 +1,107 @@
+From 5da87346c06f4aa1036dc123daeb4f3c71cd05b3 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:58:43 +0300
+Subject: [PATCH] secu, mac: byte order without <endian.h>
+
+<endian.h> is a glibc header. Two SECU headers include it, one of them
+for the endianness check, and the gNB radio configuration uses htobe32()
+from it:
+
+  openair3/SECU/aes_128.h:8:10: fatal error: 'endian.h' file not found
+  openair3/SECU/aes_128.h:59:15: error: expected parameter declarator
+
+darwin_compat.h, which utils.h includes, provides the htobe/htole and
+be/letoh families over libkern/OSByteOrder.h on Darwin; the three files
+include <endian.h> only elsewhere. The static assertion in aes_128.h
+tests __BYTE_ORDER__ against __ORDER_BIG_ENDIAN__, the compiler
+predefined macros, instead of the <endian.h> names.
+---
+ common/utils/darwin_compat.h                 | 15 +++++++++++++++
+ openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c |  4 +++-
+ openair3/SECU/aes_128.h                      |  6 ++++--
+ openair3/SECU/aes_128_ctr.h                  |  4 +++-
+ 4 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/common/utils/darwin_compat.h b/common/utils/darwin_compat.h
+index 38ea182..8a915fc 100644
+--- a/common/utils/darwin_compat.h
++++ b/common/utils/darwin_compat.h
+@@ -104,6 +104,21 @@ static inline int clock_nanosleep(clockid_t clock_id, int flags, const struct ti
+   return 0;
+ }
+ 
++/* The <endian.h> byte-order functions over libkern/OSByteOrder.h. */
++#include <libkern/OSByteOrder.h>
++#define htobe16(x) OSSwapHostToBigInt16(x)
++#define htobe32(x) OSSwapHostToBigInt32(x)
++#define htobe64(x) OSSwapHostToBigInt64(x)
++#define be16toh(x) OSSwapBigToHostInt16(x)
++#define be32toh(x) OSSwapBigToHostInt32(x)
++#define be64toh(x) OSSwapBigToHostInt64(x)
++#define htole16(x) OSSwapHostToLittleInt16(x)
++#define htole32(x) OSSwapHostToLittleInt32(x)
++#define htole64(x) OSSwapHostToLittleInt64(x)
++#define le16toh(x) OSSwapLittleToHostInt16(x)
++#define le32toh(x) OSSwapLittleToHostInt32(x)
++#define le64toh(x) OSSwapLittleToHostInt64(x)
++
+ /* get_nprocs() from glibc <sys/sysinfo.h>. */
+ static inline int get_nprocs(void)
+ {
+diff --git a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+index c1f5803..3097c13 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
++++ b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+@@ -4,7 +4,9 @@
+ 
+ #include "nr_radio_config.h"
+ 
+-#include <endian.h>
++#ifndef __APPLE__
++#include <endian.h> /* darwin_compat.h, through utils.h, has the same on Darwin */
++#endif
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+diff --git a/openair3/SECU/aes_128.h b/openair3/SECU/aes_128.h
+index 523945e..0bff234 100644
+--- a/openair3/SECU/aes_128.h
++++ b/openair3/SECU/aes_128.h
+@@ -5,7 +5,9 @@
+ #ifndef AES_128_OAI_H
+ #define AES_128_OAI_H 
+ 
+-#include <endian.h>
++#ifndef __APPLE__
++#include <endian.h> /* darwin_compat.h, through utils.h, has the same on Darwin */
++#endif
+ #include <stdint.h>
+ #include <stdlib.h>
+ 
+@@ -53,7 +55,7 @@ typedef enum {
+   AES_INITIALIZATION_VECTOR_END,
+ } iv_e;
+ 
+-#if __BYTE_ORDER == __BIG_ENDIAN
++#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+ static_assert(0 != 0, "The struct iv_t needs little endianness");
+ #endif
+ 
+diff --git a/openair3/SECU/aes_128_ctr.h b/openair3/SECU/aes_128_ctr.h
+index e2be077..a79e0ee 100644
+--- a/openair3/SECU/aes_128_ctr.h
++++ b/openair3/SECU/aes_128_ctr.h
+@@ -7,7 +7,9 @@
+ 
+ #include "aes_128.h"
+ #include "common/utils/ds/byte_array.h"
+-#include <endian.h>
++#ifndef __APPLE__
++#include <endian.h> /* darwin_compat.h, through utils.h, has the same on Darwin */
++#endif
+ #include <stdint.h>
+ #include <stdlib.h>
+ 
+-- 
+2.55.0
+

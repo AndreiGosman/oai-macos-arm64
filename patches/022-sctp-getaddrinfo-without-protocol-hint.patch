@@ -1,0 +1,79 @@
+From 8513e7a265a55bb9a3cdc0b47b028d37cdc27b53 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:57:03 +0300
+Subject: [PATCH] sctp: resolve addresses without the SCTP protocol hint on
+ Darwin
+
+The SCTP task resolves every local and remote address with getaddrinfo()
+and ai_protocol = IPPROTO_SCTP in the hints. The Linux resolver accepts
+that; the Darwin one answers EAI_BADHINTS for a protocol it does not
+know, and for SOCK_SEQPACKET as well:
+
+  getaddrinfo(127.0.0.1) failed: Bad hints
+
+sctp_getaddrinfo() makes the lookup with ai_protocol 0 there and puts
+IPPROTO_SCTP back on every result, since socket() and setsockopt() take
+the protocol from the result. Linux is unchanged.
+---
+ openair3/SCTP/sctp_eNB_task.c | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/openair3/SCTP/sctp_eNB_task.c b/openair3/SCTP/sctp_eNB_task.c
+index bf046f5..ceb8831 100644
+--- a/openair3/SCTP/sctp_eNB_task.c
++++ b/openair3/SCTP/sctp_eNB_task.c
+@@ -32,6 +32,24 @@
+ #include "sctp_common.h"
+ #include "sctp_eNB_itti_messaging.h"
+ 
++/* getaddrinfo() with SCTP in the hints. Linux resolves IPPROTO_SCTP; the
++ * Darwin resolver answers "Bad hints" for it (and for SOCK_SEQPACKET), so
++ * there the lookup is made as TCP and SCTP is put back on every result:
++ * socket() and setsockopt() below take the protocol from the result. */
++static int sctp_getaddrinfo(const char *node, const char *service, struct addrinfo *hints, struct addrinfo **res)
++{
++#ifndef __linux__
++  hints->ai_protocol = 0;
++#endif
++  int status = getaddrinfo(node, service, hints, res);
++#ifndef __linux__
++  if (status == 0)
++    for (struct addrinfo *p = *res; p != NULL; p = p->ai_next)
++      p->ai_protocol = IPPROTO_SCTP;
++#endif
++  return status;
++}
++
+ /* Used to format an uint32_t containing an ipv4 address */
+ #define IPV4_ADDR    "%u.%u.%u.%u"
+ #define IPV4_ADDR_FORMAT(aDDRESS)               \
+@@ -377,7 +395,7 @@ static void sctp_handle_new_association_req(const instance_t instance,
+     hints.ai_flags = AI_PASSIVE;
+   struct addrinfo *serv;
+ 
+-  int status = getaddrinfo(local, NULL, &hints, &serv);
++  int status = sctp_getaddrinfo(local, NULL, &hints, &serv);
+   AssertFatal(status == 0, "getaddrinfo(%s) failed: %s\n", local, gai_strerror(status));
+ 
+   int sd;
+@@ -447,7 +465,7 @@ static void sctp_handle_new_association_req(const instance_t instance,
+ 
+     char port[12];
+     snprintf(port, sizeof(port), "%d", req->port);
+-    int status = getaddrinfo(remote, port, &hints, &serv);
++    int status = sctp_getaddrinfo(remote, port, &hints, &serv);
+     AssertFatal(status == 0, "getaddrinfo(node %s service %s) failed: %s\n", remote, port, gai_strerror(status));
+ 
+     struct addrinfo *p = NULL;
+@@ -598,7 +616,7 @@ static int sctp_create_new_listener(const instance_t instance, const task_id_t r
+ 
+   char port[12];
+   snprintf(port, sizeof(port), "%d", init_p->port);
+-  int status = getaddrinfo(local, port, &hints, &serv);
++  int status = sctp_getaddrinfo(local, port, &hints, &serv);
+   AssertFatal(status == 0, "getaddrinfo() failed: %s\n", gai_strerror(status));
+ 
+   int sd;
+-- 
+2.55.0
+

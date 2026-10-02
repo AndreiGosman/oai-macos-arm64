@@ -1,0 +1,105 @@
+From 5ccfc0f78605245d61dd7b1f4d79f111ca9ed6b0 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:51:41 +0300
+Subject: [PATCH] utils: cpu_set_t and the affinity calls on Darwin, as stubs
+
+The LTE PHY, the radio units and the telnet server build CPU sets and
+pass them to pthread_setaffinity_np(), and a prototype in
+lte-softmodem.h, reached from the PHY sources, names the type:
+
+  executables/lte-softmodem.h:165:80: error: unknown type name 'cpu_set_t'
+
+Darwin has no per-thread affinity interface. darwin_compat.h now carries
+the glibc cpu_set_t type, the CPU_ZERO/SET/CLR/ISSET/COUNT/ALLOC macros
+over a 1024-bit mask, and the affinity calls as stubs that report
+ENOTSUP, with sched_getcpu() reporting -1, which the callers already
+treat as unknown. Threads keep the default placement, as they do on
+Linux without the SYS_NICE capability.
+---
+ common/utils/darwin_compat.h | 70 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 70 insertions(+)
+
+diff --git a/common/utils/darwin_compat.h b/common/utils/darwin_compat.h
+index 92aa8a8..38ea182 100644
+--- a/common/utils/darwin_compat.h
++++ b/common/utils/darwin_compat.h
+@@ -121,6 +121,76 @@ static inline int oai_pthread_setname_np(pthread_t thread, const char *name)
+ }
+ #define pthread_setname_np(thread, name) oai_pthread_setname_np((thread), (name))
+ 
++/* CPU affinity. Darwin has no per-thread affinity interface, so the glibc
++ * cpu_set_t type and its CPU_* macros exist here only to let the code that
++ * builds a set compile; the calls that would apply it report ENOTSUP, and
++ * sched_getcpu() reports -1, which the callers already treat as unknown. */
++#include <stdlib.h>
++#include <string.h>
++#include <sched.h>
++
++#define CPU_SETSIZE 1024
++typedef struct {
++  uint64_t bits[CPU_SETSIZE / 64];
++} cpu_set_t;
++
++#define CPU_ZERO(set) memset((set), 0, sizeof(cpu_set_t))
++#define CPU_SET(cpu, set) ((set)->bits[(cpu) / 64] |= (uint64_t)1 << ((cpu) % 64))
++#define CPU_CLR(cpu, set) ((set)->bits[(cpu) / 64] &= ~((uint64_t)1 << ((cpu) % 64)))
++#define CPU_ISSET(cpu, set) (((set)->bits[(cpu) / 64] >> ((cpu) % 64)) & 1)
++static inline int CPU_COUNT(const cpu_set_t *set)
++{
++  int count = 0;
++  for (size_t i = 0; i < CPU_SETSIZE / 64; i++)
++    count += __builtin_popcountll(set->bits[i]);
++  return count;
++}
++#define CPU_ALLOC_SIZE(count) sizeof(cpu_set_t)
++#define CPU_ALLOC(count) ((cpu_set_t *)calloc(1, sizeof(cpu_set_t)))
++#define CPU_FREE(set) free(set)
++
++static inline int pthread_setaffinity_np(pthread_t thread, size_t size, const cpu_set_t *set)
++{
++  (void)thread;
++  (void)size;
++  (void)set;
++  return ENOTSUP;
++}
++static inline int pthread_getaffinity_np(pthread_t thread, size_t size, cpu_set_t *set)
++{
++  (void)thread;
++  (void)size;
++  (void)set;
++  return ENOTSUP;
++}
++static inline int pthread_attr_setaffinity_np(pthread_attr_t *attr, size_t size, const cpu_set_t *set)
++{
++  (void)attr;
++  (void)size;
++  (void)set;
++  return ENOTSUP;
++}
++static inline int sched_setaffinity(pid_t pid, size_t size, const cpu_set_t *set)
++{
++  (void)pid;
++  (void)size;
++  (void)set;
++  errno = ENOTSUP;
++  return -1;
++}
++static inline int sched_getaffinity(pid_t pid, size_t size, cpu_set_t *set)
++{
++  (void)pid;
++  (void)size;
++  (void)set;
++  errno = ENOTSUP;
++  return -1;
++}
++static inline int sched_getcpu(void)
++{
++  return -1;
++}
++
+ #endif /* __APPLE__ */
+ 
+ #endif /* OAI_DARWIN_COMPAT_H */
+-- 
+2.55.0
+

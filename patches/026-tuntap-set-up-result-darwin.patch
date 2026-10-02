@@ -1,0 +1,39 @@
+From 30e00dd5386bb768747e02a373c1a5f0653ee5f0 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 16:25:55 +0300
+Subject: [PATCH] tuntap: a configured utun is not a failure of tun_config()
+
+tuntap_set_up() returns the interface flags as a short, and the Darwin
+tun_config() took any negative value as failure. On Darwin IFF_MULTICAST
+is 0x8000 (0x1000 on Linux), so the flags of a utun that was just
+brought up, 0x8051 UP,POINTOPOINT,RUNNING,MULTICAST, read as negative
+and the first PDU session reported:
+
+  [OIP] Interface utun7 (oaitun_ue1) couldn't be configured (IPv4 10.45.0.6)
+
+while the interface was up with its address and host route. Only -1 is
+a failure of tuntap_set_up(); compare with that.
+---
+ common/utils/tuntap_if.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/common/utils/tuntap_if.c b/common/utils/tuntap_if.c
+index 73b0711..b3053a9 100644
+--- a/common/utils/tuntap_if.c
++++ b/common/utils/tuntap_if.c
+@@ -458,8 +458,11 @@ bool tun_config(const char* ifname, const char *ipv4, const char *ipv6)
+   if (ipv6 != NULL)
+     LOG_W(OIP, "IPv6 %s on %s: not implemented on this platform, only IPv4 is configured\n", ipv6, real);
+ 
++  /* tuntap_set_up() returns the flags as a short; on Darwin IFF_MULTICAST is
++   * 0x8000, so a configured utun (0x8051) reads as negative. -1 is the only
++   * failure value. */
+   if (success)
+-    success = tuntap_set_up(real, sock_fd) >= 0;
++    success = tuntap_set_up(real, sock_fd) != -1;
+ 
+   if (success)
+     LOG_A(OIP, "TUN Interface %s (%s) successfully configured, IPv4 %s\n", real, ifname, ipv4 ? ipv4 : "none");
+-- 
+2.55.0
+

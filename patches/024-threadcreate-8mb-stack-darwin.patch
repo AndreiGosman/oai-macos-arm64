@@ -1,0 +1,44 @@
+From 12d3acad3b302ed66b6bb7c5996b598f6af72447 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 16:01:11 +0300
+Subject: [PATCH] utils: 8 MB of stack for every thread of threadCreate() on
+ Darwin
+
+Darwin gives a secondary thread 512 KB of stack where Linux gives the
+ulimit, 8 MB by default. The L1 and RU threads keep slot-sized buffers
+on the stack and overflow the Darwin default as soon as the radio unit
+starts:
+
+  EXC_BAD_ACCESS (SIGBUS), "Thread stack size exceeded"
+  ___chkstk_darwin + 60, rx_func + 48, L1_rx_thread + 244
+
+threadCreate() asks for the Linux amount on Darwin. Every PHY, RU,
+thread pool, ITTI and SDAP thread goes through it; the few direct
+pthread_create() calls (PDCP timer and data threads, the log flusher)
+keep the default and carry small frames.
+---
+ common/utils/system.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/common/utils/system.c b/common/utils/system.c
+index d10a632..3280759 100644
+--- a/common/utils/system.c
++++ b/common/utils/system.c
+@@ -248,6 +248,14 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
+   pthread_attr_t attr;
+   ret=pthread_attr_init(&attr);
+   AssertFatal(ret == 0, "Error in pthread_attr_init(): ret: %d, errno: %d\n", ret, errno);
++#ifdef __APPLE__
++  /* Darwin gives a secondary thread 512 KB of stack where Linux gives the
++   * ulimit, 8 MB by default. The L1 and RU threads keep slot-sized buffers
++   * on the stack and overflow the Darwin default (SIGBUS "Thread stack size
++   * exceeded" in rx_func). Ask for the Linux amount. */
++  ret = pthread_attr_setstacksize(&attr, 8u << 20);
++  AssertFatal(ret == 0, "Error in pthread_attr_setstacksize(): ret: %d, errno: %d\n", ret, errno);
++#endif
+ 
+   if (set_prio) {
+     ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+-- 
+2.55.0
+

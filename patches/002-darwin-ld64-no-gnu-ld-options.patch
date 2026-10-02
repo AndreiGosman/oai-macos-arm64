@@ -1,0 +1,333 @@
+From b392536e0aa2f477d833417dcede671c2d8b21fb Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 13:24:03 +0300
+Subject: [PATCH] build: do not pass GNU ld options and librt on Darwin
+
+ld64, the Darwin linker, is not GNU ld. It rejects --start-group and
+--end-group (it re-scans static archives on its own, so the groups are
+not needed), it has no --whole-archive, and there is no librt or libgcc
+to link: the clock_* family and the other librt symbols live in
+libSystem. The 64-bit ARM processor branch also puts -lgcc -lrt into the
+compiler flags, which clang accepts at compile time and ld64 rejects at
+link time:
+
+  ld: library 'rt' not found
+  ld: library 'gcc' not found
+  ld: unknown options: --start-group
+
+Introduce LINK_GROUP_START, LINK_GROUP_END and OAI_LIBRT, empty on
+APPLE and the previous values elsewhere, and use them in every
+target_link_libraries that spelled the options out. The whole-archive
+treatment of crc_byte in ldpctest goes through CRC_BYTE_WHOLE_ARCHIVE;
+crc_byte is an OBJECT library, so its objects are on the link line as
+they are and the option was not doing anything on any platform. The T
+tracer links rt only when not on APPLE.
+
+Also test the compiler id with MATCHES "Clang" instead of STREQUAL:
+CMake reports Apple clang as "AppleClang", so the clang-only warning
+suppressions (-Wno-unused-command-line-argument for -rdynamic) were not
+applied and every compile warned about unused link arguments.
+---
+ CMakeLists.txt                 | 85 +++++++++++++++++++++-------------
+ common/utils/T/CMakeLists.txt  |  4 +-
+ tests/nrdlbench/CMakeLists.txt |  2 +-
+ 3 files changed, 57 insertions(+), 34 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ee0b1c6..c19268e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -237,6 +237,27 @@ else ()
+   set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -march=armv8.2-a")
+ endif()
+ 
++# Darwin: ld64 is not GNU ld. It has no --start-group/--end-group (it
++# re-scans static archives on its own, so the groups are not needed), no
++# --whole-archive (-force_load takes one archive path instead), and there is
++# no librt or libgcc to link: the clock_* family and the other librt symbols
++# live in libSystem. The processor branches above also put -lgcc -lrt into
++# the compiler flags, which ld64 rejects at link time.
++if(APPLE)
++  string(REPLACE " -lgcc -lrt" "" C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR}")
++  set(LINK_GROUP_START "")
++  set(LINK_GROUP_END "")
++  set(OAI_LIBRT "")
++  # crc_byte is an OBJECT library: its objects go on the link line as they
++  # are, so no whole-archive treatment is needed (or possible) for it.
++  set(CRC_BYTE_WHOLE_ARCHIVE crc_byte)
++else()
++  set(LINK_GROUP_START ${LINK_GROUP_START})
++  set(LINK_GROUP_END ${LINK_GROUP_END})
++  set(OAI_LIBRT rt)
++  set(CRC_BYTE_WHOLE_ARCHIVE -Wl,--whole-archive crc_byte -Wl,--no-whole-archive)
++endif()
++
+ # we need -rdynamic to incorporate all symbols in shared objects, see man page
+ set(commonOpts "-pipe -fPIC -Wall -fno-strict-aliasing -rdynamic")
+ # GNU C/C++ Compiler might throw many warnings without packed-bitfield-compat, see man page
+@@ -245,7 +266,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+ endif()
+ # clang: suppress complaints about unused command line argument (-rdynamic only
+ # used during linking) and "const member leaves the object uninitialized"
+-if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
++if(CMAKE_C_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+   set(commonOpts "${commonOpts} -Wno-unused-command-line-argument -Wno-default-const-init-field-unsafe")
+ endif()
+ 
+@@ -1736,13 +1757,13 @@ add_executable(lte-softmodem
+ add_dependencies(lte-softmodem oai_iqplayer)
+ 
+ target_link_libraries(lte-softmodem PRIVATE
+-  -Wl,--start-group
++  ${LINK_GROUP_START}
+   lte_rrc nr_rrc s1ap m2ap x2ap m3ap GTPV1U SECURITY UTIL SCTP_CLIENT MME_APP SCHED_LIB SCHED_RU_LIB
+   PHY_COMMON PHY PHY_RU  L2 L2_LTE nfapi_lte_vnf_lib nfapi_pnf_lib nfapi_user_lib nfapi_lte_user_lib MISC_NFAPI_LTE_LIB
+   ${NAS_UE_LIB} ITTI SIMU radio_common softmodem_common
+-  -Wl,--end-group dl)
++  ${LINK_GROUP_END} dl)
+ 
+-target_link_libraries(lte-softmodem PRIVATE pthread m CONFIG_LIB rt)
++target_link_libraries(lte-softmodem PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT})
+ target_link_libraries(lte-softmodem PRIVATE ${T_LIB})
+ target_link_libraries(lte-softmodem PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+@@ -1763,11 +1784,11 @@ add_executable(oairu
+   ${OPENAIR_DIR}/common/utils/lte/prach_utils.c
+ )
+ target_link_libraries(oairu PRIVATE
+-  -Wl,--start-group
++  ${LINK_GROUP_START}
+   SCHED_RU_LIB PHY_COMMON PHY_RU UTIL radio_common softmodem_common
+-  -Wl,--end-group dl)
++  ${LINK_GROUP_END} dl)
+ 
+-target_link_libraries(oairu PRIVATE pthread m CONFIG_LIB rt ${T_LIB})
++target_link_libraries(oairu PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT} ${T_LIB})
+ target_link_libraries(oairu PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+ # force the generation of ASN.1 so that we don't need to wait during the build
+@@ -1789,14 +1810,14 @@ add_executable(lte-uesoftmodem
+   )
+ 
+ target_link_libraries(lte-uesoftmodem PRIVATE
+-  -Wl,--start-group
++  ${LINK_GROUP_START}
+   lte_rrc nr_rrc s1ap x2ap m2ap m3ap
+   SECURITY UTIL SCTP_CLIENT MME_APP SCHED_RU_LIB SCHED_UE_LIB PHY_COMMON
+   PHY_UE PHY_RU L2_UE L2_LTE SIMU nfapi_pnf_lib nfapi_user_lib MISC_NFAPI_LTE_LIB
+   ${NAS_UE_LIB} ITTI radio_common softmodem_common
+-  -Wl,--end-group dl)
++  ${LINK_GROUP_END} dl)
+ 
+-target_link_libraries(lte-uesoftmodem PRIVATE pthread m CONFIG_LIB rt)
++target_link_libraries(lte-uesoftmodem PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT})
+ target_link_libraries(lte-uesoftmodem PRIVATE ${T_LIB})
+ target_link_libraries(lte-uesoftmodem PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+@@ -1818,7 +1839,7 @@ if (OAI_RU_FRONTHAUL)
+   target_link_libraries(nr-oru PRIVATE
+     UTIL NR_PHY_RU PHY_NR shlib_loader dl oru_fh MAC_NR_COMMON PHY_NR_COMMON
+     radio_common softmodem_common nfapi_pnf_lib symbol_reorder)
+-  target_link_libraries(nr-oru PRIVATE pthread m CONFIG_LIB rt ${T_LIB} utils
++  target_link_libraries(nr-oru PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT} ${T_LIB} utils
+     barrier actor nfapi_user_lib)
+   target_link_libraries(nr-oru PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs nr_phy_common time_management ds)
+ endif()
+@@ -1839,15 +1860,15 @@ add_executable(nr-softmodem
+   )
+ 
+ target_link_libraries(nr-softmodem PRIVATE
+-  -Wl,--start-group
++  ${LINK_GROUP_START}
+   UTIL SCTP_CLIENT SCHED_LIB SCHED_NR_LIB PHY_NR PHY PHY_NR_COMMON NR_PHY_RU GTPV1U SECURITY
+   ITTI ${NAS_UE_LIB} nr_rrc
+   ngap s1ap L2_LTE_NR L2_NR MAC_NR_COMMON nfapi_nr_vnf_lib nfapi_pnf_lib nfapi_user_lib nfapi_lte_user_lib nfapi_nr_user_lib SIMU
+   x2ap f1ap m2ap m3ap e1ap radio_common
+   time_management softmodem_common nrppa
+-  -Wl,--end-group dl)
++  ${LINK_GROUP_END} dl)
+ 
+-target_link_libraries(nr-softmodem PRIVATE pthread m CONFIG_LIB rt)
++target_link_libraries(nr-softmodem PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT})
+ target_link_libraries(nr-softmodem PRIVATE ${T_LIB})
+ target_link_libraries(nr-softmodem PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ target_link_libraries(nr-softmodem PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -1913,14 +1934,14 @@ add_executable(nr-uesoftmodem
+   )
+ 
+ target_link_libraries(nr-uesoftmodem PRIVATE
+-  -Wl,--start-group
++  ${LINK_GROUP_START}
+   nr_rrc SECURITY UTIL SCHED_NR_UE_LIB
+   PHY_NR_COMMON PHY_NR_UE NR_L2_UE MAC_NR_COMMON nfapi_nr_lib
+   ITTI SIMU radio_common
+   time_management softmodem_common
+-  -Wl,--end-group dl)
++  ${LINK_GROUP_END} dl)
+ 
+-target_link_libraries(nr-uesoftmodem PRIVATE pthread m CONFIG_LIB rt nr_ue_phy_meas)
++target_link_libraries(nr-uesoftmodem PRIVATE pthread m CONFIG_LIB ${OAI_LIBRT} nr_ue_phy_meas)
+ target_link_libraries(nr-uesoftmodem PRIVATE ${T_LIB})
+ target_link_libraries(nr-uesoftmodem PRIVATE nr_nas lib_uicc usim_lib SECURITY)
+ target_link_libraries(nr-uesoftmodem PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -1960,7 +1981,7 @@ add_executable(polartest
+   ${OPENAIR1_DIR}/PHY/CODING/TESTBENCH/polartest.c
+   )
+ target_link_libraries(polartest PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_COMMON PHY_NR PHY_NR_COMMON PHY_NR_UE CONFIG_LIB -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_COMMON PHY_NR PHY_NR_COMMON PHY_NR_UE CONFIG_LIB ${LINK_GROUP_END}
+   m pthread dl ${T_LIB}
+   )
+ 
+@@ -1969,7 +1990,7 @@ add_executable(smallblocktest
+ )
+ 
+ target_link_libraries(smallblocktest PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR PHY_COMMON PHY_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR PHY_COMMON PHY_NR_COMMON ${LINK_GROUP_END}
+   m pthread dl ${T_LIB}
+ )
+ 
+@@ -1979,12 +2000,12 @@ add_executable(ldpctest
+   ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_load.c
+ )
+ target_link_libraries(ldpctest PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_COMMON PHY_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_COMMON PHY_NR_COMMON ${LINK_GROUP_END}
+   m pthread dl ${T_LIB} ${CUDA_LIBRARIES}
+   # link 'check_crc' to make it resolved in the LDPC coding libraries
+   # 'check_crc' is not used in ldpctest so it is not linked in the executable by default
+   # --whole-archive links 'check_crc' in the executable even though it is note used, see 'man ld'
+-  -Wl,--whole-archive crc_byte -Wl,--no-whole-archive
++  ${CRC_BYTE_WHOLE_ARCHIVE}
+ )
+ if (ENABLE_LDPC_CUDA)
+   # ldpctest.c uses cudaHostAlloc(), so include dir/link libr to make available
+@@ -1999,14 +2020,14 @@ target_link_libraries(physim_common PRIVATE UTIL)
+ 
+ add_executable(nr_dlschsim ${OPENAIR1_DIR}/SIMULATION/NR_PHY/dlschsim.c)
+ target_link_libraries(nr_dlschsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common
+   )
+ target_link_libraries(nr_dlschsim PRIVATE asn1_nr_rrc_hdrs)
+ 
+ add_executable(nr_pbchsim ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pbchsim.c)
+ target_link_libraries(nr_pbchsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common
+ )
+ target_link_libraries(nr_pbchsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -2016,14 +2037,14 @@ add_executable(nr_psbchsim
+   ${NFAPI_USER_DIR}/nfapi.c
+   )
+ target_link_libraries(nr_psbchsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common softmodem_common
+   )
+ target_link_libraries(nr_psbchsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+ add_executable(nr_pucchsim ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pucchsim.c)
+ target_link_libraries(nr_pucchsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common
+ )
+ target_link_libraries(nr_pucchsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -2035,7 +2056,7 @@ add_executable(nr_dlsim
+   ${PHY_INTERFACE_DIR}/queue_t.c
+   )
+ target_link_libraries(nr_dlsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR time_management_core -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR time_management_core ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common NR_L2_UE
+   softmodem_common
+   )
+@@ -2043,7 +2064,7 @@ target_link_libraries(nr_dlsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+ add_executable(nr_prachsim ${OPENAIR1_DIR}/SIMULATION/NR_PHY/prachsim.c)
+ target_link_libraries(nr_prachsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR NR_PHY_RU PHY_NR_UE MAC_NR_COMMON SCHED_NR_LIB CONFIG_LIB -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR NR_PHY_RU PHY_NR_UE MAC_NR_COMMON SCHED_NR_LIB CONFIG_LIB ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common)
+ target_link_libraries(nr_prachsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+ 
+@@ -2051,7 +2072,7 @@ add_executable(nr_ulschsim
+   ${OPENAIR1_DIR}/SIMULATION/NR_PHY/ulschsim.c
+   )
+ target_link_libraries(nr_ulschsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB CONFIG_LIB MAC_NR_COMMON ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common
+ )
+ target_link_libraries(nr_ulschsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -2064,7 +2085,7 @@ add_executable(nr_ulsim
+   )
+ 
+ target_link_libraries(nr_ulsim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR time_management_core -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR time_management_core ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
+   )
+ target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -2075,7 +2096,7 @@ add_executable(nr_srssim
+   )
+ 
+ target_link_libraries(nr_srssim PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON ${LINK_GROUP_END}
+   m pthread ITTI dl nr_ue_phy_meas physim_common softmodem_common
+   )
+ 
+@@ -2087,7 +2108,7 @@ add_executable(nr_ulsim_mu_mimo
+   )
+ 
+ target_link_libraries(nr_ulsim_mu_mimo PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE time_management_core
+   )
+ target_link_libraries(nr_ulsim_mu_mimo PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+@@ -2113,7 +2134,7 @@ foreach(myExe dlsim ulsim)
+     ${NFAPI_USER_DIR}/nfapi.c
+     )
+   target_link_libraries (${myExe} PRIVATE
+-    -Wl,--start-group SIMU UTIL SCHED_LIB SCHED_RU_LIB SCHED_UE_LIB PHY_COMMON PHY_NR_COMMON PHY PHY_UE PHY_RU ITTI -Wl,--end-group
++    ${LINK_GROUP_START} SIMU UTIL SCHED_LIB SCHED_RU_LIB SCHED_UE_LIB PHY_COMMON PHY_NR_COMMON PHY PHY_UE PHY_RU ITTI ${LINK_GROUP_END}
+     pthread m rt CONFIG_LIB ${T_LIB} dl
+     )
+   target_link_libraries(${myExe} PRIVATE asn1_lte_rrc_hdrs)
+diff --git a/common/utils/T/CMakeLists.txt b/common/utils/T/CMakeLists.txt
+index beb011c..65a749c 100644
+--- a/common/utils/T/CMakeLists.txt
++++ b/common/utils/T/CMakeLists.txt
+@@ -56,7 +56,9 @@ target_include_directories(T_headers INTERFACE ${CMAKE_CURRENT_BINARY_DIR} ${CMA
+ 
+ if(T_TRACER)
+   add_library(T STATIC T.c local_tracer.c T_messages_creator.c T_IDs.h T_messages.txt.h)
+-  target_link_libraries(T PUBLIC rt)
++  if(NOT APPLE)
++    target_link_libraries(T PUBLIC rt)
++  endif()
+   target_link_libraries(T PRIVATE CONFIG_LIB T_headers)
+ 
+   add_subdirectory(tracer)
+diff --git a/tests/nrdlbench/CMakeLists.txt b/tests/nrdlbench/CMakeLists.txt
+index 505bf35..1f46ddd 100644
+--- a/tests/nrdlbench/CMakeLists.txt
++++ b/tests/nrdlbench/CMakeLists.txt
+@@ -8,7 +8,7 @@ add_executable(nr_dlbench
+   ${PHY_INTERFACE_DIR}/queue_t.c
+   )
+ target_link_libraries(nr_dlbench PRIVATE
+-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR SCHED_NR_LIB MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
++  ${LINK_GROUP_START} UTIL SIMU PHY_NR_COMMON PHY_NR SCHED_NR_LIB MAC_NR_COMMON CONFIG_LIB L2_NR ${LINK_GROUP_END}
+   m pthread ${T_LIB} ITTI dl physim_common time_management_core
+   softmodem_common
+   )
+-- 
+2.55.0
+

@@ -1,0 +1,46 @@
+From a8e3c99ed4df2af1ec40117f61d2372d586ebb96 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:54:55 +0300
+Subject: [PATCH] build: pass the OpenSSL include directory from pkg-config
+
+The SECU, NAS and UICC sources include <openssl/*.h>. The library came
+from pkg_check_modules(OpenSSL) but only its link libraries were used;
+the headers were found because /usr/include is on the compiler search
+path on Linux. On a prefix outside that path, Homebrew on Darwin, they
+are not:
+
+  openair3/SECU/curve_25519.h:8:10: fatal error: 'openssl/opensslv.h'
+  file not found
+
+Add OpenSSL_INCLUDE_DIRS to the include directories right after the
+module check, as cmake_targets/at_commands already does.
+---
+ CMakeLists.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1dd3ce7..4fb7833 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -640,6 +640,8 @@ target_link_libraries(CONFIG_LIB PRIVATE config_internals dl UTIL)
+ # CONFIG_LIB is a wrapper around a particular config implementation, default is
+ # libconfig in params_libconfig below
+ pkg_check_modules(libconfig REQUIRED libconfig)
++# enb_config.h, mme_config.h and the NAS tools include <libconfig.h> directly
++include_directories(${libconfig_INCLUDE_DIRS})
+ add_library(params_libconfig MODULE ${CONFIG_ROOTDIR}/libconfig/config_libconfig.c)
+ target_include_directories(params_libconfig PRIVATE ${libconfig_INCLUDE_DIRS})
+ target_link_libraries(params_libconfig PRIVATE config_internals ${libconfig_LINK_LIBRARIES})
+@@ -775,6 +777,9 @@ set(SECURITY_SRC
+   )
+ 
+ pkg_check_modules(OpenSSL openssl REQUIRED)
++# the SECU, NAS and test sources include <openssl/*.h>; on a prefix outside
++# the compiler search path (Homebrew) the directory has to be passed on
++include_directories(${OpenSSL_INCLUDE_DIRS})
+ add_library(SECURITY ${SECURITY_SRC} $<TARGET_OBJECTS:ds>)
+ target_include_directories(SECURITY PRIVATE ${OPENAIR_DIR}/common/utils/ds/)
+ target_link_libraries(SECURITY PRIVATE ${OpenSSL_LINK_LIBRARIES})
+-- 
+2.55.0
+

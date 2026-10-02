@@ -1,0 +1,544 @@
+From 51890f7b07cb7f2ea071fccacb96a8470fd063ab Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:28:35 +0300
+Subject: [PATCH] utils: keep the Linux-only process and thread interfaces
+ under __linux__
+
+The utils library did not compile on Darwin for five reasons, none of
+them needed by a gNB running over the RF simulator:
+
+  system.c:223:10: fatal error: 'linux/capability.h' file not found
+  time_meas.h:15:10: fatal error: 'linux/kernel.h' file not found
+  tuntap_if.c:14:10: fatal error: 'linux/netlink.h' file not found
+  thread-pool.c:12:10: fatal error: 'sys/sysinfo.h' file not found
+  time_meas.c:279:50: error: use of undeclared identifier 'SCHED_IDLE'
+  vcd_signal_dumper.c:17:10: fatal error: 'error.h' file not found
+
+has_cap_sys_nice() without libcap read the capability set through a raw
+Linux syscall; keep that under __linux__ and answer false elsewhere, so
+that threads are created with default priority and no pinning, the same
+as an unprivileged Linux process. threadCreate() and thread_top_init()
+keep their cpu_set_t handling under __linux__ and report that pinning is
+not available. The glibc headers linux/kernel.h, linux/types.h,
+sys/sysinfo.h and error.h are included only where they exist; nothing in
+these files uses them except get_nprocs(), which darwin_compat.h now
+provides over sysconf(). darwin_compat.h also accepts the two-argument
+pthread_setname_np() for the calling thread; Darwin cannot name another
+thread, and threadCreate() says so instead of asserting. SCHED_IDLE is a
+Linux policy: the CPU measurement thread keeps the default policy where
+it does not exist.
+
+tuntap_if.c is written on the Linux tun driver, ioctl(2) interface
+configuration and ip(8) rules. Only the UE reaches it. On other
+platforms every function reports failure; utun on Darwin is a separate
+step.
+---
+ common/utils/LOG/vcd_signal_dumper.c          |  1 -
+ common/utils/darwin_compat.h                  | 18 +++++
+ common/utils/system.c                         | 32 +++++++-
+ common/utils/telnetsrv/telnetsrv_proccmd.c    |  2 +
+ .../utils/threadPool/test/test_thread-pool.c  |  2 +
+ common/utils/threadPool/thread-pool.c         |  2 +
+ common/utils/time_meas.c                      |  4 +-
+ common/utils/time_meas.h                      |  2 +
+ common/utils/tuntap_if.c                      | 78 +++++++++++++++++++
+ common/utils/utils.h                          |  1 +
+ executables/lte-ru.c                          |  2 +
+ executables/lte-softmodem.h                   |  2 +
+ executables/nr-ru.c                           |  2 +
+ executables/nr-softmodem-common.h             |  4 +
+ executables/ru_control.c                      |  2 +
+ openair1/PHY/defs_UE.h                        |  2 +
+ openair1/PHY/defs_common.h                    |  2 +
+ openair1/PHY/defs_eNB.h                       |  2 +
+ radio/COMMON/record_player.c                  |  2 +
+ 19 files changed, 156 insertions(+), 6 deletions(-)
+
+diff --git a/common/utils/LOG/vcd_signal_dumper.c b/common/utils/LOG/vcd_signal_dumper.c
+index 792b4dd..f02542e 100644
+--- a/common/utils/LOG/vcd_signal_dumper.c
++++ b/common/utils/LOG/vcd_signal_dumper.c
+@@ -14,7 +14,6 @@
+ #include <string.h>
+ #include <errno.h>
+ #include <fcntl.h>
+-#include <error.h>
+ #include <time.h>
+ #include <unistd.h>
+ 
+diff --git a/common/utils/darwin_compat.h b/common/utils/darwin_compat.h
+index a97f7d2..92aa8a8 100644
+--- a/common/utils/darwin_compat.h
++++ b/common/utils/darwin_compat.h
+@@ -13,6 +13,7 @@
+ #include <errno.h>
+ #include <pthread.h>
+ #include <time.h>
++#include <unistd.h>
+ 
+ /* pthread_barrier_* over a mutex, a condition variable and a generation
+  * counter, with the POSIX return values. */
+@@ -103,6 +104,23 @@ static inline int clock_nanosleep(clockid_t clock_id, int flags, const struct ti
+   return 0;
+ }
+ 
++/* get_nprocs() from glibc <sys/sysinfo.h>. */
++static inline int get_nprocs(void)
++{
++  return (int)sysconf(_SC_NPROCESSORS_ONLN);
++}
++
++/* pthread_setname_np(): Darwin names only the calling thread and takes the
++ * name alone. Accept the two-argument form for the calling thread and
++ * report ENOTSUP for any other thread. */
++static inline int oai_pthread_setname_np(pthread_t thread, const char *name)
++{
++  if (pthread_equal(thread, pthread_self()))
++    return pthread_setname_np(name);
++  return ENOTSUP;
++}
++#define pthread_setname_np(thread, name) oai_pthread_setname_np((thread), (name))
++
+ #endif /* __APPLE__ */
+ 
+ #endif /* OAI_DARWIN_COMPAT_H */
+diff --git a/common/utils/system.c b/common/utils/system.c
+index af07288..d10a632 100644
+--- a/common/utils/system.c
++++ b/common/utils/system.c
+@@ -214,7 +214,7 @@ bool has_cap_sys_nice(void)
+   /* return true if CAP_SYS_NICE is currently set */
+   return val == CAP_SET;
+ }
+-#else
++#elif defined(__linux__)
+ /* libcap has not been detected on this system. We do not need to require it --
+  * we can try to read directly via a syscall. This is discouraged, though; from
+  * the man page: "The portable interfaces are cap_set_proc(3) and
+@@ -231,6 +231,13 @@ bool has_cap_sys_nice(void)
+     return false;
+   return (cap[0].effective & (1 << CAP_SYS_NICE)) != 0;
+ }
++#else
++/* No capability interface on this platform: never raise priorities or pin
++ * threads, the same behaviour as an unprivileged Linux process. */
++bool has_cap_sys_nice(void)
++{
++  return false;
++}
+ #endif
+ 
+ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name, int affinity, int priority)
+@@ -264,6 +271,7 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
+     LOG_I(UTIL, "%s() for %s: creating thread (no affinity, default priority)\n", __func__, name);
+   }
+ 
++#ifdef __linux__
+   if (affinity != -1) {
+     cpu_set_t cpuset;
+     CPU_ZERO(&cpuset);
+@@ -272,6 +280,10 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
+     ret = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
+     AssertFatal(ret == 0, "Error in pthread_attr_setaffinity_np(): ret: %d, errno: %d\n", ret, errno);
+   }
++#else
++  if (affinity != -1)
++    LOG_W(UTIL, "%s() for %s: CPU affinity is not supported on this platform, thread not pinned\n", __func__, name);
++#endif
+ 
+   ret=pthread_create(t, &attr, func, param);
+   AssertFatal(ret == 0, "Error in pthread_create(): ret: %d, errno: %d\n", ret, errno);
+@@ -279,7 +291,12 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
+   char short_name[16];
+   strncpy(short_name, name, sizeof(short_name) - 1);
+   short_name[sizeof(short_name) - 1] = '\0';
++#ifdef __APPLE__
++  /* Darwin can only name the calling thread; the name is not applied. */
++  ret = 0;
++#else
+   ret = pthread_setname_np(*t, short_name);
++#endif
+   // pthread_create() can initialize and complete before setting a name
+   AssertFatal(ret == 0 || ret == ENOENT || ret == ESRCH, "Error in pthread_setname_np(): ret: %d, errno: %d\n", ret, errno);
+   if (ret != 0) {
+@@ -301,8 +318,12 @@ void thread_top_init(char *thread_name)
+   int policy, s, j;
+   struct sched_param sparam;
+   char cpu_affinity[1024];
+-  cpu_set_t cpuset;
+   int settingPriority = 1;
++  int cpu = -1;
++
++  memset(cpu_affinity,0,sizeof(cpu_affinity));
++#ifdef __linux__
++  cpu_set_t cpuset;
+ 
+   /* Set affinity mask to include CPUs 2 to MAX_CPUS */
+   /* CPU 0 is reserved for UHD threads */
+@@ -317,7 +338,6 @@ void thread_top_init(char *thread_name)
+     perror( "pthread_getaffinity_np");
+     exit_fun("Error getting processor affinity ");
+   }
+-  memset(cpu_affinity,0,sizeof(cpu_affinity));
+   for (j = 0; j < 1024; j++)
+   {
+     if (CPU_ISSET(j, &cpuset))
+@@ -327,6 +347,10 @@ void thread_top_init(char *thread_name)
+       strcat(cpu_affinity, temp);
+     }
+   }
++  cpu = sched_getcpu();
++#else
++  (void)j;
++#endif
+ 
+   if (settingPriority) {
+     memset(&sparam, 0, sizeof(sparam));
+@@ -347,7 +371,7 @@ void thread_top_init(char *thread_name)
+ 
+     pthread_setname_np(pthread_self(), thread_name);
+ 
+-    LOG_I(HW, "[SCHED][eNB] %s started on CPU %d, sched_policy = %s , priority = %d, CPU Affinity=%s \n",thread_name,sched_getcpu(),
++    LOG_I(HW, "[SCHED][eNB] %s started on CPU %d, sched_policy = %s , priority = %d, CPU Affinity=%s \n",thread_name,cpu,
+                      (policy == SCHED_FIFO)  ? "SCHED_FIFO" :
+                      (policy == SCHED_RR)    ? "SCHED_RR" :
+                      (policy == SCHED_OTHER) ? "SCHED_OTHER" :
+diff --git a/common/utils/telnetsrv/telnetsrv_proccmd.c b/common/utils/telnetsrv/telnetsrv_proccmd.c
+index 5a9fc0a..2dbc57b 100644
+--- a/common/utils/telnetsrv/telnetsrv_proccmd.c
++++ b/common/utils/telnetsrv/telnetsrv_proccmd.c
+@@ -9,7 +9,9 @@
+ #define _GNU_SOURCE
+ #include <sys/types.h>
+ #include <sys/socket.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <netdb.h>
+diff --git a/common/utils/threadPool/test/test_thread-pool.c b/common/utils/threadPool/test/test_thread-pool.c
+index 628909b..28e9461 100644
+--- a/common/utils/threadPool/test/test_thread-pool.c
++++ b/common/utils/threadPool/test/test_thread-pool.c
+@@ -9,7 +9,9 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <ctype.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include "thread-pool.h"
+ #include "log.h"
+ #include "task_ans.h"
+diff --git a/common/utils/threadPool/thread-pool.c b/common/utils/threadPool/thread-pool.c
+index 8c746e7..e04e0a0 100644
+--- a/common/utils/threadPool/thread-pool.c
++++ b/common/utils/threadPool/thread-pool.c
+@@ -9,7 +9,9 @@
+ #include <ctype.h>
+ #include "thread-pool.h"
+ #include "bounded_notified_fifo.h"
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ 
+ typedef struct {
+   tpool_t* tpool;
+diff --git a/common/utils/time_meas.c b/common/utils/time_meas.c
+index c0a533b..5df6481 100644
+--- a/common/utils/time_meas.c
++++ b/common/utils/time_meas.c
+@@ -273,11 +273,13 @@ void free_measurtbl(void) {
+ }
+ 
+ void run_cpumeasur(void) {
+-    struct sched_param schedp;
+     pthread_setname_np(pthread_self(), "measur");
++#ifdef SCHED_IDLE /* Linux policy; elsewhere the thread keeps the default one */
++    struct sched_param schedp;
+     schedp.sched_priority=0;
+     int rt=pthread_setschedparam(pthread_self(), SCHED_IDLE, &schedp);
+     AssertFatal(rt==0, "couldn't set measur thread priority: %s\n",strerror(errno));
++#endif
+     initNotifiedFIFO(&measur_fifo);
+     while(1) {
+       notifiedFIFO_elt_t *msg = pullNotifiedFIFO(&measur_fifo);
+diff --git a/common/utils/time_meas.h b/common/utils/time_meas.h
+index 426be4c..54983ed 100644
+--- a/common/utils/time_meas.h
++++ b/common/utils/time_meas.h
+@@ -12,8 +12,10 @@
+ #include <errno.h>
+ #include <stdio.h>
+ #include <pthread.h>
++#ifdef __linux__
+ #include <linux/kernel.h>
+ #include <linux/types.h>
++#endif
+ // global var to enable openair performance profiler
+ extern int cpu_meas_enabled;
+ extern double cpu_freq_GHz  __attribute__ ((aligned(32)));
+diff --git a/common/utils/tuntap_if.c b/common/utils/tuntap_if.c
+index 0b9d03b..17729f5 100644
+--- a/common/utils/tuntap_if.c
++++ b/common/utils/tuntap_if.c
+@@ -10,8 +10,10 @@
+ #include <net/if.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/ipv6.h>
+ #include <linux/netlink.h>
++#endif
+ 
+ #include "tuntap_if.h"
+ #include "common/platform_constants.h"
+@@ -21,6 +23,8 @@
+ int nas_sock_fd[MAX_MOBILES_PER_ENB * 2]; // Allocated for both LTE UE and NR UE.
+ int nas_sock_mbms_fd;
+ 
++#ifdef __linux__
++
+ int tuntap_alloc(int flag, const char *dev)
+ {
+   struct ifreq ifr;
+@@ -301,6 +305,73 @@ void setup_ue_ipv4_route(const char* ifname, int instance_id, int pdu_session_id
+   background_system(command_line);
+ }
+ 
++#else /* not __linux__ */
++
++/* The implementation above is written on the Linux tun driver, ioctl(2)
++ * interface configuration and ip(8) rules. Only the UE reaches these
++ * functions; the gNB never opens a tunnel. Darwin has utun instead, which
++ * is not implemented here: every call reports failure. */
++
++static int tuntap_unsupported(const char *func, const char *ifname)
++{
++  LOG_E(UTIL, "%s(%s): TUN/TAP interfaces are not implemented on this platform\n", func, ifname ? ifname : "");
++  return -1;
++}
++
++int tuntap_alloc(int flag, const char *dev)
++{
++  (void)flag;
++  return tuntap_unsupported(__func__, dev);
++}
++
++void tuntap_reblock(int fd)
++{
++  (void)fd;
++}
++
++int tun_init_mbms(char *ifname)
++{
++  tuntap_unsupported(__func__, ifname);
++  return 0;
++}
++
++int tun_init(const char *ifname, int instance_id)
++{
++  (void)instance_id;
++  tuntap_unsupported(__func__, ifname);
++  return 0;
++}
++
++short tuntap_set_up(const char *ifname, int sock_fd)
++{
++  (void)sock_fd;
++  return (short)tuntap_unsupported(__func__, ifname);
++}
++
++bool tun_config(const char* ifname, const char *ipv4, const char *ipv6)
++{
++  (void)ipv4;
++  (void)ipv6;
++  tuntap_unsupported(__func__, ifname);
++  return false;
++}
++
++bool tap_config(const char* ifname)
++{
++  tuntap_unsupported(__func__, ifname);
++  return false;
++}
++
++void setup_ue_ipv4_route(const char* ifname, int instance_id, int pdu_session_id, const char *ipv4)
++{
++  (void)instance_id;
++  (void)pdu_session_id;
++  (void)ipv4;
++  tuntap_unsupported(__func__, ifname);
++}
++
++#endif /* __linux__ */
++
+ int tun_generate_ifname(char *ifname, const char *ifprefix, int instance_id)
+ {
+   return snprintf(ifname, IFNAMSIZ, "%s%d", ifprefix, instance_id + 1);
+@@ -316,6 +387,7 @@ int tuntap_generate_ue_ifname(char *ifname, int flag, int instance_id, int pdu_s
+   return snprintf(ifname, IFNAMSIZ, "%s%d%s", basename, instance_id + 1, pdu_session_id == -1 ? "" : pdu_session_string);
+ }
+ 
++#ifdef __linux__
+ void tuntap_destroy(const char *dev)
+ {
+   // Use a new socket for ioctl operations
+@@ -334,3 +406,9 @@ void tuntap_destroy(const char *dev)
+   } // no else: get_if_flags()/set_if_flags() should have printed error
+   close(fd);
+ }
++#else
++void tuntap_destroy(const char *dev)
++{
++  tuntap_unsupported(__func__, dev);
++}
++#endif /* __linux__ */
+diff --git a/common/utils/utils.h b/common/utils/utils.h
+index cd78210..03acacc 100644
+--- a/common/utils/utils.h
++++ b/common/utils/utils.h
+@@ -14,6 +14,7 @@ extern "C" {
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/types.h>
++#include <common/utils/darwin_compat.h>
+ #ifdef __APPLE__
+ /* Darwin has no <malloc.h> and no memalign(); posix_memalign() is the
+  * portable spelling of the same allocation. */
+diff --git a/executables/lte-ru.c b/executables/lte-ru.c
+index 1bfcc32..a124414 100644
+--- a/executables/lte-ru.c
++++ b/executables/lte-ru.c
+@@ -19,7 +19,9 @@
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ 
+ #include "assertions.h"
+ #include "PHY/defs_common.h"
+diff --git a/executables/lte-softmodem.h b/executables/lte-softmodem.h
+index 873b66b..b99063f 100644
+--- a/executables/lte-softmodem.h
++++ b/executables/lte-softmodem.h
+@@ -20,7 +20,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include "assertions.h"
+diff --git a/executables/nr-ru.c b/executables/nr-ru.c
+index 6c238ee..8b34668 100644
+--- a/executables/nr-ru.c
++++ b/executables/nr-ru.c
+@@ -9,7 +9,9 @@
+ #include <string.h>
+ #include <sched.h>
+ #include <linux/sched.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <math.h>
+ 
+ #include "common/utils/nr/nr_common.h"
+diff --git a/executables/nr-softmodem-common.h b/executables/nr-softmodem-common.h
+index 02bc577..e2c1e96 100644
+--- a/executables/nr-softmodem-common.h
++++ b/executables/nr-softmodem-common.h
+@@ -23,11 +23,15 @@
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include "assertions.h"
+ 
+ /* help strings definition for command line options, used in CMDLINE_XXX_DESC macros and printed when -h option is used */
+diff --git a/executables/ru_control.c b/executables/ru_control.c
+index d988361..abfdf6b 100644
+--- a/executables/ru_control.c
++++ b/executables/ru_control.c
+@@ -17,7 +17,9 @@
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ 
+ #include "assertions.h"
+ 
+diff --git a/openair1/PHY/defs_UE.h b/openair1/PHY/defs_UE.h
+index 2084993..b0ca22f 100644
+--- a/openair1/PHY/defs_UE.h
++++ b/openair1/PHY/defs_UE.h
+@@ -22,7 +22,9 @@
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ 
+ 
+ #include <stdio.h>
+diff --git a/openair1/PHY/defs_common.h b/openair1/PHY/defs_common.h
+index 4e6688e..6a4a2df 100644
+--- a/openair1/PHY/defs_common.h
++++ b/openair1/PHY/defs_common.h
+@@ -25,7 +25,9 @@
+ #include <signal.h>
+ #include <execinfo.h>
+ #include <getopt.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
+diff --git a/openair1/PHY/defs_eNB.h b/openair1/PHY/defs_eNB.h
+index 05258e3..1cdce6e 100644
+--- a/openair1/PHY/defs_eNB.h
++++ b/openair1/PHY/defs_eNB.h
+@@ -26,7 +26,9 @@
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+diff --git a/radio/COMMON/record_player.c b/radio/COMMON/record_player.c
+index b54f745..c19d8cc 100644
+--- a/radio/COMMON/record_player.c
++++ b/radio/COMMON/record_player.c
+@@ -5,7 +5,9 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <stdio.h>
++#ifdef __linux__
+ #include <sys/sysinfo.h>
++#endif
+ #include <sys/resource.h>
+ #include "common/utils/LOG/log.h"
+ #include "assertions.h"
+-- 
+2.55.0
+

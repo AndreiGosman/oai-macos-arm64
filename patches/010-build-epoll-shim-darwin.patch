@@ -1,0 +1,45 @@
+From 3600afa4a3a6774a9c521c43ea5e208dbb451a09 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:34:55 +0300
+Subject: [PATCH] build: use epoll-shim for epoll, eventfd and timerfd on
+ Darwin
+
+The inter-task interface, the time manager, the RF simulator and the
+ZMQ radio are written on epoll(7), eventfd(2) and timerfd(2), which
+Darwin does not have:
+
+  intertask_interface.h:8:10: fatal error: 'sys/epoll.h' file not found
+
+epoll-shim (https://github.com/jiixyj/epoll-shim) implements the three
+over kqueue(2). Its sys/epoll.h redefines close() and fcntl() as macros
+over its own wrappers, so that the context behind a shim descriptor is
+released on close, and intertask_interface.h includes that header: every
+library that uses the ITTI references the shim. Link it everywhere on
+APPLE, through the imported target that carries the include directory,
+rather than per target.
+---
+ CMakeLists.txt | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 286d257..1dd3ce7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -252,6 +252,14 @@ if(APPLE)
+   # refuses them unless told to resolve them at load time.
+   set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-undefined,dynamic_lookup")
+   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-undefined,dynamic_lookup")
++  # The inter-task interface, the time manager, the RF simulator and the ZMQ
++  # radio are written on epoll, eventfd and timerfd. epoll-shim provides
++  # those over kqueue (https://github.com/jiixyj/epoll-shim). Its sys/epoll.h
++  # redefines close() and fcntl() as macros over its own wrappers, and the
++  # inter-task interface header includes it, so every library that uses the
++  # ITTI references the shim: link it everywhere rather than per target.
++  find_package(epoll-shim REQUIRED)
++  link_libraries(epoll-shim::epoll-shim)
+   set(LINK_GROUP_START "")
+   set(LINK_GROUP_END "")
+   set(OAI_LIBRT "")
+-- 
+2.55.0
+

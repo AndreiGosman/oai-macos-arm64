@@ -1,0 +1,40 @@
+From f50a73cd437adc13c4a14671daa5b15dd03fc84e Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 16:06:58 +0300
+Subject: [PATCH] mac: allocate the transport block buffer with malloc()
+
+allocate_transportBlock_buffer() asked for aligned_alloc(4, size). The
+C standard leaves an alignment that the implementation does not
+support, and a size that is not a multiple of it, undefined; glibc
+accepts both, Darwin answers EINVAL and NULL for an alignment below
+sizeof(void *), so the first Msg4 dereferenced NULL:
+
+  EXC_BAD_ACCESS (SIGSEGV) at 0x0
+  nr_write_ce_dlsch_pdu(mac_pdu=0x0) <- nr_generate_Msg4_MsgB <- nr_schedule_RA
+
+The buffer is read as uint32_t by FAPI, which is why the alignment was
+asked for. malloc() aligns to max_align_t on every platform, which
+covers it.
+---
+ openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+index 2e19b48..564d7e1 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
++++ b/openair2/LAYER2/NR_MAC_gNB/gNB_scheduler_primitives.c
+@@ -2709,7 +2709,10 @@ uint8_t *allocate_transportBlock_buffer(byte_array_t *tb, uint32_t needed)
+     size *= 2;
+   LOG_D(NR_MAC, "allocating new TB block of size %d\n", size);
+   free(tb->buf);
+-  tb->buf = aligned_alloc(4, size); // important: FAPI use u32*
++  // important: FAPI uses u32*; malloc() aligns to max_align_t on every platform, which
++  // covers that. aligned_alloc(4, size) is refused by Darwin (alignment below the
++  // pointer size, size not a multiple of it) and answers NULL.
++  tb->buf = malloc(size);
+   tb->len = size;
+   return tb->buf;
+ }
+-- 
+2.55.0
+

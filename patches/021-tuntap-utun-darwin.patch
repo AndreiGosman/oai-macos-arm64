@@ -1,0 +1,443 @@
+From d7433ac2d9a9beb526a484b2861a96987f3ed046 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:51:55 +0300
+Subject: [PATCH] tuntap: utun implementation for Darwin
+
+The UE data path opens a TUN interface for every PDU session through
+tuntap_if.c, which was written on the Linux tun driver and, on Darwin,
+reported failure for every call since the first port step.
+
+Darwin has utun instead: a kernel control socket (PF_SYSTEM,
+SYSPROTO_CONTROL, com.apple.net.utun_control). The kernel assigns the
+unit and the name, so the name OAI generates (oaitun_ue1p<n>) cannot be
+applied; tuntap_if.c keeps a table from the requested name to the utun
+the kernel handed out, and the configuration and teardown calls that
+follow look the real name up. The address goes on with SIOCAIFADDR as
+address, destination (the broadaddr slot, the kernel reads it as the
+destination of a point to point interface) and mask; that gives the host
+route, any further route is set up outside. IPv6, TAP and the MBMS
+tunnel are reported as not implemented. Opening a utun requires root.
+
+Every packet on a utun carries a 4-byte address family in host order in
+front of the IP header. tuntap_read() and tuntap_write() strip and add
+it; on Linux they are read(2) and write(2). The SDAP reader and writer
+and the LTE PDCP writer use them instead of the raw calls. The flag
+values IFF_TUN and IFF_TAP come from linux/if_tun.h on Linux and are
+defined in tuntap_if.h elsewhere; the interface-flag helpers are shared
+by both implementations.
+---
+ common/utils/tuntap_if.c                 | 223 +++++++++++++++++++----
+ common/utils/tuntap_if.h                 |  27 +++
+ openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c |   5 +-
+ openair2/SDAP/nr_sdap/nr_sdap.c          |   2 +-
+ openair2/SDAP/nr_sdap/nr_sdap_entity.c   |   2 +-
+ 5 files changed, 224 insertions(+), 35 deletions(-)
+
+diff --git a/common/utils/tuntap_if.c b/common/utils/tuntap_if.c
+index 17729f5..73b0711 100644
+--- a/common/utils/tuntap_if.c
++++ b/common/utils/tuntap_if.c
+@@ -62,6 +62,8 @@ int tuntap_alloc(int flag, const char *dev)
+   return fd;
+ }
+ 
++#endif /* __linux__ */
++
+ void tuntap_reblock(int fd)
+ {
+   int f = fcntl(fd, F_GETFL, 0);
+@@ -74,6 +76,7 @@ void tuntap_reblock(int fd)
+     LOG_E(UTIL, "fcntl(F_SETFL) failed on fd %d: errno %d, %s\n", fd, errno, strerror(errno));
+ }
+ 
++#ifdef __linux__
+ int tun_init_mbms(char *ifname)
+ {
+   nas_sock_mbms_fd = tuntap_alloc(IFF_TUN, ifname);
+@@ -158,6 +161,8 @@ static bool setInterfaceParameter(int sock_fd, const char *ifn, int af, const ch
+ }
+ 
+ 
++#endif /* __linux__ */
++
+ /*
+ * \brief Get an interface's flags.
+ * \param[in]  sock_fd socket to use for getting the flags
+@@ -214,6 +219,7 @@ short tuntap_set_up(const char *ifname, int sock_fd)
+   return flags;
+ }
+ 
++#ifdef __linux__
+ bool tun_config(const char* ifname, const char *ipv4, const char *ipv6)
+ {
+   AssertFatal(ipv4 != NULL || ipv6 != NULL, "need to have IP address, but none given\n");
+@@ -305,60 +311,168 @@ void setup_ue_ipv4_route(const char* ifname, int instance_id, int pdu_session_id
+   background_system(command_line);
+ }
+ 
+-#else /* not __linux__ */
++#else /* not __linux__: Darwin utun */
+ 
+-/* The implementation above is written on the Linux tun driver, ioctl(2)
+- * interface configuration and ip(8) rules. Only the UE reaches these
+- * functions; the gNB never opens a tunnel. Darwin has utun instead, which
+- * is not implemented here: every call reports failure. */
++/*
++ * Darwin has no /dev/net/tun. A utun interface is a kernel control socket
++ * (PF_SYSTEM, SYSPROTO_CONTROL, com.apple.net.utun_control); the kernel
++ * assigns the unit and the name, utunN, so the name OAI generates cannot be
++ * applied. The table below maps every requested name to the utun the kernel
++ * handed out, so that the configuration calls that follow find it. Every
++ * packet on a utun carries a 4-byte address family in host order in front
++ * of the IP header, see tuntap_read() and tuntap_write(). Opening a utun
++ * requires root. There is no TAP device.
++ */
++
++#include <sys/kern_control.h>
++#include <sys/sys_domain.h>
++#include <sys/uio.h>
++#include <net/if_utun.h>
++#include <netinet/ip.h>
++
++#define TUN_MAP_MAX 64
++static struct {
++  char requested[IFNAMSIZ];
++  char utun[IFNAMSIZ];
++} tun_map[TUN_MAP_MAX];
+ 
+-static int tuntap_unsupported(const char *func, const char *ifname)
++static const char *tun_real_name(const char *requested)
+ {
+-  LOG_E(UTIL, "%s(%s): TUN/TAP interfaces are not implemented on this platform\n", func, ifname ? ifname : "");
+-  return -1;
++  for (int i = 0; i < TUN_MAP_MAX; i++)
++    if (tun_map[i].requested[0] != 0 && strcmp(tun_map[i].requested, requested) == 0)
++      return tun_map[i].utun;
++  return requested;
+ }
+ 
+-int tuntap_alloc(int flag, const char *dev)
++static void tun_map_name(const char *requested, const char *utun)
+ {
+-  (void)flag;
+-  return tuntap_unsupported(__func__, dev);
++  for (int i = 0; i < TUN_MAP_MAX; i++) {
++    if (tun_map[i].requested[0] == 0 || strcmp(tun_map[i].requested, requested) == 0) {
++      strncpy(tun_map[i].requested, requested, IFNAMSIZ - 1);
++      strncpy(tun_map[i].utun, utun, IFNAMSIZ - 1);
++      return;
++    }
++  }
++  LOG_E(UTIL, "no room to remember utun %s for %s\n", utun, requested);
+ }
+ 
+-void tuntap_reblock(int fd)
++int tuntap_alloc(int flag, const char *dev)
+ {
+-  (void)fd;
++  if (flag != IFF_TUN) {
++    LOG_E(UTIL, "%s: only TUN is available on this platform (utun carries IP packets), no TAP\n", dev);
++    return -1;
++  }
++
++  int fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
++  if (fd < 0) {
++    LOG_E(UTIL, "socket(PF_SYSTEM, SYSPROTO_CONTROL) failed: %d, %s\n", errno, strerror(errno));
++    return -1;
++  }
++
++  struct ctl_info info = {0};
++  strncpy(info.ctl_name, UTUN_CONTROL_NAME, sizeof(info.ctl_name) - 1);
++  if (ioctl(fd, CTLIOCGINFO, &info) < 0) {
++    LOG_E(UTIL, "ioctl(CTLIOCGINFO, %s) failed: %d, %s\n", UTUN_CONTROL_NAME, errno, strerror(errno));
++    close(fd);
++    return -1;
++  }
++
++  struct sockaddr_ctl addr = {
++      .sc_len = sizeof(addr), .sc_family = AF_SYSTEM, .ss_sysaddr = AF_SYS_CONTROL, .sc_id = info.ctl_id, .sc_unit = 0 /* any */};
++  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++    LOG_E(UTIL, "connect(utun) failed: %d, %s%s\n", errno, strerror(errno), errno == EPERM ? " (root is required to open a utun)" : "");
++    close(fd);
++    return -1;
++  }
++
++  char utun[IFNAMSIZ] = {0};
++  socklen_t len = sizeof(utun);
++  if (getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, utun, &len) < 0) {
++    LOG_E(UTIL, "getsockopt(UTUN_OPT_IFNAME) failed: %d, %s\n", errno, strerror(errno));
++    close(fd);
++    return -1;
++  }
++  tun_map_name(dev, utun);
++  LOG_I(UTIL, "TUN %s: the kernel assigned %s\n", dev, utun);
++
++  if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
++    LOG_E(UTIL, "Error fcntl (%d:%s)\n", errno, strerror(errno));
++    close(fd);
++    return -1;
++  }
++  return fd;
+ }
+ 
+ int tun_init_mbms(char *ifname)
+ {
+-  tuntap_unsupported(__func__, ifname);
++  LOG_E(UTIL, "%s: MBMS over TUN is not implemented on this platform\n", ifname);
+   return 0;
+ }
+ 
+ int tun_init(const char *ifname, int instance_id)
+ {
+-  (void)instance_id;
+-  tuntap_unsupported(__func__, ifname);
+-  return 0;
+-}
+-
+-short tuntap_set_up(const char *ifname, int sock_fd)
+-{
+-  (void)sock_fd;
+-  return (short)tuntap_unsupported(__func__, ifname);
++  nas_sock_fd[instance_id] = tuntap_alloc(IFF_TUN, ifname);
++  if (nas_sock_fd[instance_id] == -1) {
++    LOG_E(UTIL, "Error opening socket %s (%d:%s)\n", ifname, errno, strerror(errno));
++    return 0;
++  }
++  LOG_I(UTIL, "Opened socket %s with fd nas_sock_fd[%d]=%d\n", ifname, instance_id, nas_sock_fd[instance_id]);
++  return 1;
+ }
+ 
++/* A utun is point to point: SIOCAIFADDR wants the address, the destination
++ * (in the broadaddr slot) and the mask. The destination is the address
++ * itself, which gives the host route; the routes of the UE subnet are the
++ * caller's (they cross the UPF's utun on a single host). */
+ bool tun_config(const char* ifname, const char *ipv4, const char *ipv6)
+ {
+-  (void)ipv4;
+-  (void)ipv6;
+-  tuntap_unsupported(__func__, ifname);
+-  return false;
++  AssertFatal(ipv4 != NULL || ipv6 != NULL, "need to have IP address, but none given\n");
++  const char *real = tun_real_name(ifname);
++
++  int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
++  if (sock_fd < 0) {
++    LOG_E(UTIL, "Failed creating socket for interface management: %d, %s\n", errno, strerror(errno));
++    return false;
++  }
++
++  bool success = true;
++  if (ipv4 != NULL) {
++    struct ifaliasreq ifra = {0};
++    strncpy(ifra.ifra_name, real, sizeof(ifra.ifra_name) - 1);
++    struct sockaddr_in addr = {.sin_len = sizeof(addr), .sin_family = AF_INET};
++    if (inet_pton(AF_INET, ipv4, &addr.sin_addr) != 1) {
++      LOG_E(OIP, "inet_pton(): cannot convert %s to IPv4 network address\n", ipv4);
++      close(sock_fd);
++      return false;
++    }
++    struct sockaddr_in mask = {.sin_len = sizeof(mask), .sin_family = AF_INET, .sin_addr.s_addr = htonl(0xffffff00)};
++    memcpy(&ifra.ifra_addr, &addr, sizeof(addr));
++    memcpy(&ifra.ifra_broadaddr, &addr, sizeof(addr)); /* ifra_dstaddr: the slot is shared */
++    memcpy(&ifra.ifra_mask, &mask, sizeof(mask));
++    if (ioctl(sock_fd, SIOCAIFADDR, &ifra) < 0) {
++      LOG_E(OIP, "ioctl(SIOCAIFADDR) on %s (%s): %d, %s\n", real, ifname, errno, strerror(errno));
++      success = false;
++    }
++  }
++
++  if (ipv6 != NULL)
++    LOG_W(OIP, "IPv6 %s on %s: not implemented on this platform, only IPv4 is configured\n", ipv6, real);
++
++  if (success)
++    success = tuntap_set_up(real, sock_fd) >= 0;
++
++  if (success)
++    LOG_A(OIP, "TUN Interface %s (%s) successfully configured, IPv4 %s\n", real, ifname, ipv4 ? ipv4 : "none");
++  else
++    LOG_E(OIP, "Interface %s (%s) couldn't be configured (IPv4 %s)\n", real, ifname, ipv4 ? ipv4 : "none");
++
++  close(sock_fd);
++  return success;
+ }
+ 
+ bool tap_config(const char* ifname)
+ {
+-  tuntap_unsupported(__func__, ifname);
++  LOG_E(OIP, "TAP interface %s: not available on this platform\n", ifname);
+   return false;
+ }
+ 
+@@ -366,12 +480,48 @@ void setup_ue_ipv4_route(const char* ifname, int instance_id, int pdu_session_id
+ {
+   (void)instance_id;
+   (void)pdu_session_id;
+-  (void)ipv4;
+-  tuntap_unsupported(__func__, ifname);
++  /* Linux adds policy routing rules here. On Darwin the host route to the UE
++   * address exists from SIOCAIFADDR; any further route (the UE subnet on a
++   * host that also runs the UPF) is set up outside, with route(8). */
++  LOG_I(OIP, "No policy routing on this platform for %s (%s); routes beyond the host route are external\n", tun_real_name(ifname), ipv4);
+ }
+ 
+ #endif /* __linux__ */
+ 
++/* I/O on the TUN descriptor. On Darwin every utun packet carries a 4-byte
++ * address family in host byte order in front of the IP header. */
++ssize_t tuntap_read(int fd, void *buf, size_t len)
++{
++#ifdef __linux__
++  return read(fd, buf, len);
++#else
++  uint32_t af;
++  struct iovec iov[2] = {{&af, sizeof(af)}, {buf, len}};
++  ssize_t n = readv(fd, iov, 2);
++  if (n < 0)
++    return n;
++  if ((size_t)n < sizeof(af))
++    return 0;
++  return n - (ssize_t)sizeof(af);
++#endif
++}
++
++ssize_t tuntap_write(int fd, const void *buf, size_t len)
++{
++#ifdef __linux__
++  return write(fd, buf, len);
++#else
++  if (len == 0)
++    return 0;
++  uint32_t af = htonl((((const uint8_t *)buf)[0] >> 4) == 6 ? AF_INET6 : AF_INET);
++  struct iovec iov[2] = {{&af, sizeof(af)}, {(void *)buf, len}};
++  ssize_t n = writev(fd, iov, 2);
++  if (n < 0)
++    return n;
++  return n >= (ssize_t)sizeof(af) ? n - (ssize_t)sizeof(af) : 0;
++#endif
++}
++
+ int tun_generate_ifname(char *ifname, const char *ifprefix, int instance_id)
+ {
+   return snprintf(ifname, IFNAMSIZ, "%s%d", ifprefix, instance_id + 1);
+@@ -409,6 +559,17 @@ void tuntap_destroy(const char *dev)
+ #else
+ void tuntap_destroy(const char *dev)
+ {
+-  tuntap_unsupported(__func__, dev);
++  const char *real = tun_real_name(dev);
++  int fd = socket(AF_INET, SOCK_DGRAM, 0);
++  if (fd < 0) {
++    LOG_E(UTIL, "Failed to create socket for interface teardown: %d, %s\n", errno, strerror(errno));
++    return;
++  }
++  short flags = 0;
++  bool success = get_if_flags(fd, real, &flags);
++  success = success && set_if_flags(fd, real, flags & ~IFF_UP);
++  if (success)
++    LOG_I(UTIL, "Interface %s (%s) is now down; it disappears with its descriptor.\n", real, dev);
++  close(fd);
+ }
+ #endif /* __linux__ */
+diff --git a/common/utils/tuntap_if.h b/common/utils/tuntap_if.h
+index 7307d9a..e3b4feb 100644
+--- a/common/utils/tuntap_if.h
++++ b/common/utils/tuntap_if.h
+@@ -6,8 +6,20 @@
+ #define TUN_IF_H_
+ 
+ #include <stdbool.h>
++#include <stddef.h>
++#include <sys/types.h>
+ #include <net/if.h>
++#ifdef __linux__
+ #include <linux/if_tun.h>
++#else
++/* the Linux tun flag values, used as the "flag" argument below */
++#ifndef IFF_TUN
++#define IFF_TUN 0x0001
++#endif
++#ifndef IFF_TAP
++#define IFF_TAP 0x0002
++#endif
++#endif
+ 
+ /*!
+  * \brief This function generates the name of the interface based on the prefix and
+@@ -105,4 +117,19 @@ void tuntap_destroy(const char *dev);
+  */
+ short tuntap_set_up(const char *ifname, int sock_fd);
+ 
++/*!
++ * \brief Read one IP packet from a TUN fd into buf. On Linux this is read(2)
++ * on an IFF_NO_PI device; on Darwin the utun 4-byte address family header is
++ * stripped.
++ * \return the packet length, or -1 with errno set
++ */
++ssize_t tuntap_read(int fd, void *buf, size_t len);
++
++/*!
++ * \brief Write one IP packet to a TUN fd. On Darwin the utun 4-byte address
++ * family header is added from the IP version of the packet.
++ * \return the packet length written (without the header), or -1 with errno set
++ */
++ssize_t tuntap_write(int fd, const void *buf, size_t len);
++
+ #endif /*TUN_IF_H_*/
+diff --git a/openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c b/openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c
+index 50cfe13..3ba15e2 100644
+--- a/openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c
++++ b/openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c
+@@ -35,6 +35,7 @@ extern int otg_enabled;
+ #include <sys/socket.h>
+ #include <linux/netlink.h>
+ 
++#include "common/utils/tuntap_if.h"
+ extern int nas_sock_fd[MAX_MOBILES_PER_ENB];
+ 
+ extern int nas_sock_mbms_fd;
+@@ -87,14 +88,14 @@ int pdcp_fifo_flush_sdus(const protocol_ctxt_t *const  ctxt_pP) {
+        {
+ 	 if( LOG_DEBUGFLAG(DEBUG_PDCP) ) 
+ 	   log_dump(PDCP, pdcpData, pdcpHead->data_size, LOG_DUMP_CHAR,"PDCP output to be sent to TUN interface: \n");
+-	 ret = write(nas_sock_fd[pdcpHead->inst], pdcpData,pdcpHead->data_size );
++	 ret = tuntap_write(nas_sock_fd[pdcpHead->inst], pdcpData,pdcpHead->data_size );
+ 	 LOG_T(PDCP,"[UE PDCP_FIFOS] ret %d TRIED TO PUSH DATA TO rb_id %d handle %d sizeToWrite %d\n",
+ 	       ret,rb_id,nas_sock_fd[pdcpHead->inst],pdcpHead->data_size);
+        }
+     } else if (ENB_NAS_USE_TUN) {
+       if( LOG_DEBUGFLAG(DEBUG_PDCP) ) 
+ 	log_dump(PDCP, pdcpData, pdcpHead->data_size, LOG_DUMP_CHAR,"PDCP output to be sent to TUN interface: \n");
+-      ret = write(nas_sock_fd[0], pdcpData, pdcpHead->data_size);
++      ret = tuntap_write(nas_sock_fd[0], pdcpData, pdcpHead->data_size);
+        LOG_T(PDCP,"[NB PDCP_FIFOS] ret %d TRIED TO PUSH DATA TO rb_id %d handle %d sizeToWrite %d\n",ret,rb_id,nas_sock_fd[0],pdcpHead->data_size);
+     }
+     
+diff --git a/openair2/SDAP/nr_sdap/nr_sdap.c b/openair2/SDAP/nr_sdap/nr_sdap.c
+index e7a4b15..096d907 100644
+--- a/openair2/SDAP/nr_sdap/nr_sdap.c
++++ b/openair2/SDAP/nr_sdap/nr_sdap.c
+@@ -100,7 +100,7 @@ static void *sdap_tun_read_thread(void *arg)
+   tuntap_reblock(entity->tun.sock);
+ 
+   while (1) {
+-    int len = read(entity->tun.sock, rx_buf, NL_MAX_PAYLOAD);
++    int len = tuntap_read(entity->tun.sock, rx_buf, NL_MAX_PAYLOAD);
+     if (len == -1) {
+       if (errno == EINTR)
+         continue; // interrupted system call
+diff --git a/openair2/SDAP/nr_sdap/nr_sdap_entity.c b/openair2/SDAP/nr_sdap/nr_sdap_entity.c
+index 6e182e3..5be0bb0 100644
+--- a/openair2/SDAP/nr_sdap/nr_sdap_entity.c
++++ b/openair2/SDAP/nr_sdap/nr_sdap_entity.c
+@@ -398,7 +398,7 @@ nr_sdap_rx_entity(nr_sdap_entity_t *entity, int drb_id, int is_gnb, int pdusessi
+       LOG_D(SDAP, "[UE %ld] PDU session %d: TUN not attached, drop DL SDU (%d B)\n", ue_id, pdusession_id, size - offset);
+       return;
+     }
+-    int len = write(entity->tun.sock, &buf[offset], size - offset);
++    int len = tuntap_write(entity->tun.sock, &buf[offset], size - offset);
+     LOG_D(SDAP, "RX Entity len : %d\n", len);
+     LOG_D(SDAP, "RX Entity size : %d\n", size);
+     LOG_D(SDAP, "RX Entity offset : %d\n", offset);
+-- 
+2.55.0
+

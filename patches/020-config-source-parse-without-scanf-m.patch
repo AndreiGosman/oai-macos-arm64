@@ -1,0 +1,56 @@
+From e37bb381004d96e367a5d0d1f69e58ab81ffab96 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:22:12 +0300
+Subject: [PATCH] config: parse the configuration source without the %m scanf
+ modifier
+
+load_configmodule() split the configuration source, <mode>[:<params>],
+with sscanf() and the allocating %m conversion, a glibc extension. A
+libc without it leaves cfgmode unset and the next strdup() dereferences
+NULL, so every executable crashed at start-up, before printing anything
+but the command line:
+
+  frame #0: libsystem_platform.dylib`_platform_strlen + 4
+  frame #1: libsystem_c.dylib`strdup + 24
+  frame #2: nr-softmodem`load_configmodule + 684
+
+Split on the first ":" with strchr() and copy the two parts with
+strndup() and strdup(); the result and the error handling are the ones
+the sscanf() call produced.
+---
+ common/config/config_load_configmodule.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/common/config/config_load_configmodule.c b/common/config/config_load_configmodule.c
+index 4be2894..1bf0d3b 100644
+--- a/common/config/config_load_configmodule.c
++++ b/common/config/config_load_configmodule.c
+@@ -266,8 +266,23 @@ configmodule_interface_t *load_configmodule(int argc,
+     }
+   }
+ 
+-  /* parse the config parameters to set the config source */
+-  i = sscanf(cfgparam,"%m[^':']:%ms",&cfgmode,&modeparams);
++  /* parse the config parameters to set the config source, <mode>[:<params>].
++     Done by hand: the allocating %m conversion of sscanf() is glibc only. */
++  {
++    const char *sep = strchr(cfgparam, ':');
++    if (sep == NULL) {
++      i = 1;
++      cfgmode = strdup(cfgparam);
++    } else {
++      i = 2;
++      cfgmode = strndup(cfgparam, (size_t)(sep - cfgparam));
++      modeparams = strdup(sep + 1);
++    }
++    if (cfgmode == NULL || (i == 2 && modeparams == NULL)) {
++      errno = ENOMEM;
++      i = -1;
++    }
++  }
+ 
+   if (i< 0) {
+     fprintf(stderr,"[CONFIG] %s, %d, sscanf error parsing config source  %s: %s\n", __FILE__, __LINE__,cfgparam, strerror(errno));
+-- 
+2.55.0
+

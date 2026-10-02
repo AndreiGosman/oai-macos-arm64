@@ -1,0 +1,60 @@
+From 2d46737b2cef61692c3b7b10fe3a99e327c71cb3 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:34:55 +0300
+Subject: [PATCH] nas: bitfield order from the compiler where asm/byteorder.h
+ is absent
+
+The EMM and ESM message header definitions include the Linux
+asm/byteorder.h for __LITTLE_ENDIAN_BITFIELD and __BIG_ENDIAN_BITFIELD,
+which select the bit-field layout of the packed NAS headers. Every
+holder of the ITTI header pulls them in:
+
+  openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h:22:10: fatal error:
+  'asm/byteorder.h' file not found
+
+Where that header does not exist, derive the macro from the compiler
+predefined __BYTE_ORDER__, which GCC and clang both provide.
+---
+ openair3/NAS/COMMON/EMM/MSG/emm_msgDef.h | 6 ++++++
+ openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h | 6 ++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/openair3/NAS/COMMON/EMM/MSG/emm_msgDef.h b/openair3/NAS/COMMON/EMM/MSG/emm_msgDef.h
+index 16acc4e..f5efdc3 100644
+--- a/openair3/NAS/COMMON/EMM/MSG/emm_msgDef.h
++++ b/openair3/NAS/COMMON/EMM/MSG/emm_msgDef.h
+@@ -18,7 +18,13 @@ Description Defines identifiers of the EPS Mobility Management messages.
+ #define __EMM_MSGDEF_H__
+ 
+ #include <stdint.h>
++#ifdef __linux__
+ #include <asm/byteorder.h>
++#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#define __LITTLE_ENDIAN_BITFIELD
++#else
++#define __BIG_ENDIAN_BITFIELD
++#endif
+ 
+ /****************************************************************************/
+ /*********************  G L O B A L    C O N S T A N T S  *******************/
+diff --git a/openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h b/openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h
+index 484a960..1ee3e92 100644
+--- a/openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h
++++ b/openair3/NAS/COMMON/ESM/MSG/esm_msgDef.h
+@@ -19,7 +19,13 @@ Description Defines identifiers of the EPS Session Management messages
+ #define __ESM_MSGDEF_H__
+ 
+ #include <stdint.h>
++#ifdef __linux__
+ #include <asm/byteorder.h>
++#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#define __LITTLE_ENDIAN_BITFIELD
++#else
++#define __BIG_ENDIAN_BITFIELD
++#endif
+ 
+ /****************************************************************************/
+ /*********************  G L O B A L    C O N S T A N T S  *******************/
+-- 
+2.55.0
+

@@ -1,0 +1,253 @@
+From 21572ca379e17ea2a02c91f50db7943a8d08ecd1 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 13:27:04 +0300
+Subject: [PATCH] utils: do not include <malloc.h>, provide memalign() on
+ Darwin
+
+<malloc.h> is a glibc header. Darwin does not have it, so every file
+that includes it fails before anything else is compiled:
+
+  common/utils/utils.h:16:10: fatal error: 'malloc.h' file not found
+
+Of the fifteen files that include it, none uses anything from it except
+memalign(), reached through the malloc16() macros in utils.h,
+defs_nr_UE.h and defs_L1_NB_IoT.h and through a handful of direct calls
+in the PHY. Twelve files only need <stdlib.h> and get that instead.
+utils.h, which every memalign() user reaches through tools_defs.h or
+log.h, keeps <malloc.h> off Darwin and defines memalign() there as an
+inline wrapper over posix_memalign(), the portable spelling of the same
+allocation. The two PHY headers that spell out malloc16() over
+memalign() keep <malloc.h> under #ifndef __APPLE__ and rely on utils.h
+on Darwin.
+---
+ common/utils/threadPool/notified_fifo.h              |  3 ++-
+ common/utils/threadPool/thread-pool.h                |  2 +-
+ common/utils/utils.h                                 | 12 +++++++++++-
+ nfapi/open-nFAPI/fapi/src/nr_fapi_p7_utils.c         |  2 +-
+ .../nrLDPC_coding/nrLDPC_coding_interface_load.c     |  2 +-
+ openair1/PHY/CODING/nrLDPC_load.c                    |  2 +-
+ openair1/PHY/LTE_TRANSPORT/sss_gen.c                 |  2 +-
+ openair1/PHY/MODULATION/gen_75KHz.cpp                |  2 +-
+ openair1/PHY/TOOLS/dfts_load.c                       |  2 +-
+ openair1/PHY/defs_L1_NB_IoT.h                        |  4 +++-
+ openair1/PHY/defs_UE.h                               |  2 +-
+ openair1/PHY/defs_common.h                           |  2 +-
+ openair1/PHY/defs_eNB.h                              |  2 +-
+ openair1/PHY/defs_nr_UE.h                            |  4 +++-
+ openair2/UTIL/CLI/cli.h                              |  2 +-
+ 15 files changed, 30 insertions(+), 15 deletions(-)
+
+diff --git a/common/utils/threadPool/notified_fifo.h b/common/utils/threadPool/notified_fifo.h
+index eb29ad4..5214623 100644
+--- a/common/utils/threadPool/notified_fifo.h
++++ b/common/utils/threadPool/notified_fifo.h
+@@ -7,7 +7,8 @@
+ #include "pthread_utils.h"
+ #include <errno.h>
+ #include <stdint.h>
+-#include <malloc.h>
++#include <stdlib.h>
++#include "common/utils/utils.h" /* memalign() */
+ #include <pthread.h>
+ #include "time_meas.h"
+ #include <memory.h>
+diff --git a/common/utils/threadPool/thread-pool.h b/common/utils/threadPool/thread-pool.h
+index a7062ce..88b1c56 100644
+--- a/common/utils/threadPool/thread-pool.h
++++ b/common/utils/threadPool/thread-pool.h
+@@ -6,7 +6,7 @@
+ #define THREAD_POOL_H
+ #include <stdbool.h>
+ #include <stdint.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <stdalign.h>
+ #include <pthread.h>
+ #include <unistd.h>
+diff --git a/common/utils/utils.h b/common/utils/utils.h
+index f984f4f..cd78210 100644
+--- a/common/utils/utils.h
++++ b/common/utils/utils.h
+@@ -13,8 +13,18 @@ extern "C" {
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <malloc.h>
+ #include <sys/types.h>
++#ifdef __APPLE__
++/* Darwin has no <malloc.h> and no memalign(); posix_memalign() is the
++ * portable spelling of the same allocation. */
++static inline void *memalign(size_t alignment, size_t size)
++{
++  void *ptr = NULL;
++  return posix_memalign(&ptr, alignment, size) == 0 ? ptr : NULL;
++}
++#else
++#include <malloc.h>
++#endif
+ #include <common/utils/assertions.h>
+ 
+ #ifdef MALLOC_TRACE
+diff --git a/nfapi/open-nFAPI/fapi/src/nr_fapi_p7_utils.c b/nfapi/open-nFAPI/fapi/src/nr_fapi_p7_utils.c
+index 47377c2..3c4b5ac 100644
+--- a/nfapi/open-nFAPI/fapi/src/nr_fapi_p7_utils.c
++++ b/nfapi/open-nFAPI/fapi/src/nr_fapi_p7_utils.c
+@@ -3,7 +3,7 @@
+  */
+ #include "nr_fapi_p7_utils.h"
+ 
+-#include <malloc.h>
++#include <stdlib.h>
+ 
+ static bool eq_dl_tti_beamforming(const nfapi_nr_tx_precoding_and_beamforming_t *a,
+                                   const nfapi_nr_tx_precoding_and_beamforming_t *b)
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c
+index 5ab9ef4..49797cf 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c
+@@ -9,7 +9,7 @@
+ #define _GNU_SOURCE 
+ #include <sys/types.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include "assertions.h"
+ #include "common/utils/LOG/log.h"
+ #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+diff --git a/openair1/PHY/CODING/nrLDPC_load.c b/openair1/PHY/CODING/nrLDPC_load.c
+index 51d3fce..e5e0031 100644
+--- a/openair1/PHY/CODING/nrLDPC_load.c
++++ b/openair1/PHY/CODING/nrLDPC_load.c
+@@ -8,7 +8,7 @@
+ #define _GNU_SOURCE
+ #include <sys/types.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include "assertions.h"
+ #include "common/utils/LOG/log.h"
+ #include "PHY/CODING/nrLDPC_extern.h"
+diff --git a/openair1/PHY/LTE_TRANSPORT/sss_gen.c b/openair1/PHY/LTE_TRANSPORT/sss_gen.c
+index d7de3b4..46bac82 100644
+--- a/openair1/PHY/LTE_TRANSPORT/sss_gen.c
++++ b/openair1/PHY/LTE_TRANSPORT/sss_gen.c
+@@ -5,7 +5,7 @@
+ #include <stdio.h>
+ #include <stdint.h>
+ #include <string.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <stdlib.h>
+ #include <math.h>
+ 
+diff --git a/openair1/PHY/MODULATION/gen_75KHz.cpp b/openair1/PHY/MODULATION/gen_75KHz.cpp
+index 716ad82..5b3ee0b 100644
+--- a/openair1/PHY/MODULATION/gen_75KHz.cpp
++++ b/openair1/PHY/MODULATION/gen_75KHz.cpp
+@@ -5,7 +5,7 @@
+ #include <stdio.h>
+ #include <stdint.h>
+ #include <string.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <assert.h>
+ #include <complex>
+ #include <cmath>
+diff --git a/openair1/PHY/TOOLS/dfts_load.c b/openair1/PHY/TOOLS/dfts_load.c
+index 2adc102..7afcb8d 100644
+--- a/openair1/PHY/TOOLS/dfts_load.c
++++ b/openair1/PHY/TOOLS/dfts_load.c
+@@ -8,7 +8,7 @@
+ #define _GNU_SOURCE 
+ #include <sys/types.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include "assertions.h"
+ #include "common/utils/LOG/log.h"
+ #include "tools_defs.h"
+diff --git a/openair1/PHY/defs_L1_NB_IoT.h b/openair1/PHY/defs_L1_NB_IoT.h
+index deb498d..920eebd 100644
+--- a/openair1/PHY/defs_L1_NB_IoT.h
++++ b/openair1/PHY/defs_L1_NB_IoT.h
+@@ -13,7 +13,9 @@
+ #endif
+ #include <stdio.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#ifndef __APPLE__
++#include <malloc.h> /* memalign(); utils.h provides it on Darwin */
++#endif
+ #include <string.h>
+ #include <math.h>
+ #include "openair2/PHY_INTERFACE/IF_Module_NB_IoT.h"
+diff --git a/openair1/PHY/defs_UE.h b/openair1/PHY/defs_UE.h
+index ab092dc..2084993 100644
+--- a/openair1/PHY/defs_UE.h
++++ b/openair1/PHY/defs_UE.h
+@@ -27,7 +27,7 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
+ #include "common_lib.h"
+diff --git a/openair1/PHY/defs_common.h b/openair1/PHY/defs_common.h
+index 467630a..4e6688e 100644
+--- a/openair1/PHY/defs_common.h
++++ b/openair1/PHY/defs_common.h
+@@ -26,7 +26,7 @@
+ #include <execinfo.h>
+ #include <getopt.h>
+ #include <sys/sysinfo.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
+ #include <common/utils/LOG/log.h>
+diff --git a/openair1/PHY/defs_eNB.h b/openair1/PHY/defs_eNB.h
+index c47645c..05258e3 100644
+--- a/openair1/PHY/defs_eNB.h
++++ b/openair1/PHY/defs_eNB.h
+@@ -16,7 +16,7 @@
+ #include <execinfo.h>
+ #include <getopt.h>
+ #include <linux/sched.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <math.h>
+ #include <pthread.h>
+ #include <sched.h>
+diff --git a/openair1/PHY/defs_nr_UE.h b/openair1/PHY/defs_nr_UE.h
+index e8c7e91..5b3be4b 100644
+--- a/openair1/PHY/defs_nr_UE.h
++++ b/openair1/PHY/defs_nr_UE.h
+@@ -22,7 +22,9 @@
+ #include "common/utils/threadPool/task_ans.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+-#include <malloc.h>
++#ifndef __APPLE__
++#include <malloc.h> /* memalign(); utils.h provides it on Darwin */
++#endif
+ #include <string.h>
+ #include <math.h>
+ #include "fapi_nr_ue_interface.h"
+diff --git a/openair2/UTIL/CLI/cli.h b/openair2/UTIL/CLI/cli.h
+index fc0e3cf..00a1208 100644
+--- a/openair2/UTIL/CLI/cli.h
++++ b/openair2/UTIL/CLI/cli.h
+@@ -16,7 +16,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+-#include <malloc.h>
++#include <stdlib.h>
+ #include <setjmp.h>
+ #include <signal.h>
+ #include <sys/socket.h>
+-- 
+2.55.0
+

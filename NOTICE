@@ -1,0 +1,54 @@
+SPDX-License-Identifier: MIT
+oai-macos-arm64
+
+This repository contains patches, configuration files, shell scripts and
+documentation for building and running the OpenAirInterface (Duranta) gNB
+and nrUE on macOS with Apple Silicon. It does not contain or redistribute
+the OpenAirInterface source tree or any binaries built from it.
+
+OpenAirInterface, Duranta project
+  https://github.com/duranta-project/openairinterface5g
+  Copyright of the OpenAirInterface Authors; hosted by LF Networking as the
+  Duranta project.
+  Licensed under the Collaborative Standards Software License v1.0 (CSSL),
+  SPDX LicenseRef-CSSL-1.0, text in LICENSES/CSSL-v1.0.txt as shipped by
+  upstream (LICENSES/preferred/CSSL-v1.0.txt at tag 2026.w39, commit
+  29d5fa7d).
+  The files under patches/ are modifications to OpenAirInterface source
+  files and are derivative works of OpenAirInterface. They are offered
+  under the same CSSL v1.0 terms as the files they modify, and each carries
+  the SPDX header of the file it modifies where it adds a file.
+  config/gnb.conf is derived from
+  targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf
+  in the OpenAirInterface tree, with the changes listed in README.md.
+  config/ue.conf follows the layout of targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf.
+
+Open5GS
+  https://github.com/open5gs/open5gs
+  Copyright (C) 2019-2026 by Sukchan Lee and contributors
+  Licensed under the GNU Affero General Public License v3.0.
+  No Open5GS file is included here. config/start-5gc-user.sh starts Open5GS
+  binaries with the configuration set of the open5gs-macos-arm64 kit.
+
+Tools the port depends on, none of them included here:
+  asn1c, https://github.com/mouse07410/asn1c, BSD-2-Clause, at the commit
+  OpenAirInterface pins (940dd5fa9f3917913fd487b13dfddfacd0ded06e).
+  SIMDe, https://github.com/simd-everywhere/simde-no-tests, MIT, at the
+  commit OpenAirInterface pins (1c68d9ad60bf63f3fb527c4ee3b2319d828ffcc6).
+  epoll-shim, https://github.com/jiixyj/epoll-shim, MIT.
+  libsctp-compat, https://github.com/AndreiGosman/libsctp-compat-macos-arm64,
+  LGPL-2.1-or-later, v0.4.1 or later.
+
+The test subscriber values (PLMN 001/01, IMSI 001010000000001, the K and OPc
+strings in config/ue.conf) are the public test vectors from the Open5GS
+documentation, not secrets.
+
+Licensing of this repository, file by file:
+  patches/*.patch: modifications to OpenAirInterface source files, derivative
+    works of OpenAirInterface, under CSSL v1.0 (LICENSES/CSSL-v1.0.txt). The
+    two files the series adds carry the SPDX header LicenseRef-CSSL-1.0.
+  config/gnb.conf, config/ue.conf: derived from the OpenAirInterface sample
+    configurations, under CSSL v1.0, marked with the same SPDX header.
+  README.md, NOTICE, config/render.sh, config/start-5gc-user.sh,
+    config/run-5gsa-oai-root.sh: the kit's own work, under the MIT License
+    (LICENSE), marked SPDX MIT.

@@ -1,0 +1,205 @@
+From 8f58c13e2454d8bad9b07a737f4dbab3dec02325 Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 15:06:26 +0300
+Subject: [PATCH] radio: struct ether_header from net/ethernet.h on Darwin
+
+  radio/ETHERNET/if_defs.h:8:10: fatal error: 'netinet/ether.h' file not found
+
+The Ethernet front-haul headers, reached by the gNB configuration
+through if_defs.h, include <netinet/ether.h> for struct ether_header and
+ether_aton_r(). Darwin declares both in <net/ethernet.h>. The seven
+files pick the header per platform.
+---
+ radio/AW2SORI/oaiori.c        |  6 ++++++
+ radio/ETHERNET/eth_raw.c      |  6 ++++++
+ radio/ETHERNET/eth_udp.c      |  6 ++++++
+ radio/ETHERNET/ethernet_lib.c |  6 ++++++
+ radio/ETHERNET/ethernet_lib.h | 19 +++++++++++++++++++
+ radio/ETHERNET/if_defs.h      |  4 ++++
+ radio/LMSSDR/lms_lib.cpp      |  6 ++++++
+ 7 files changed, 53 insertions(+)
+
+diff --git a/radio/AW2SORI/oaiori.c b/radio/AW2SORI/oaiori.c
+index e755dcd..3bfbc6b 100644
+--- a/radio/AW2SORI/oaiori.c
++++ b/radio/AW2SORI/oaiori.c
+@@ -7,7 +7,9 @@
+  */
+ 
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -15,7 +17,11 @@
+ #include <sys/socket.h>
+ #include <sys/uio.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <unistd.h>
+ #include <errno.h>
+ #include <linux/sysctl.h>
+diff --git a/radio/ETHERNET/eth_raw.c b/radio/ETHERNET/eth_raw.c
+index 89e211c..531d4c6 100644
+--- a/radio/ETHERNET/eth_raw.c
++++ b/radio/ETHERNET/eth_raw.c
+@@ -7,14 +7,20 @@
+  */
+ 
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <unistd.h>
+ #include <errno.h>
+ 
+diff --git a/radio/ETHERNET/eth_udp.c b/radio/ETHERNET/eth_udp.c
+index 7c7ba10..83bed46 100644
+--- a/radio/ETHERNET/eth_udp.c
++++ b/radio/ETHERNET/eth_udp.c
+@@ -10,7 +10,9 @@
+ #define _GNU_SOURCE
+ 
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -18,7 +20,11 @@
+ #include <sys/socket.h>
+ #include <linux/filter.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <unistd.h>
+ #include <errno.h>
+ #include <sched.h>
+diff --git a/radio/ETHERNET/ethernet_lib.c b/radio/ETHERNET/ethernet_lib.c
+index f835647..96ce99f 100644
+--- a/radio/ETHERNET/ethernet_lib.c
++++ b/radio/ETHERNET/ethernet_lib.c
+@@ -8,14 +8,20 @@
+ 
+ #include "utils.h"
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <unistd.h>
+ #include <errno.h>
+ #include <linux/sysctl.h>
+diff --git a/radio/ETHERNET/ethernet_lib.h b/radio/ETHERNET/ethernet_lib.h
+index 6ba0a86..1e9493a 100644
+--- a/radio/ETHERNET/ethernet_lib.h
++++ b/radio/ETHERNET/ethernet_lib.h
+@@ -9,14 +9,33 @@
+ #define ETHERNET_LIB_H
+ 
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#else
++/* AF_PACKET is Linux. The raw Ethernet transport (eth_raw.c) is not built
++ * elsewhere; the address field below only has to exist for the state
++ * structure to be laid out. */
++struct sockaddr_ll {
++  unsigned short sll_family;
++  unsigned short sll_protocol;
++  int sll_ifindex;
++  unsigned short sll_hatype;
++  unsigned char sll_pkttype;
++  unsigned char sll_halen;
++  unsigned char sll_addr[8];
++};
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include "common/utils/threadPool/notified_fifo.h"
+ 
+ #define MAX_INST 4
+diff --git a/radio/ETHERNET/if_defs.h b/radio/ETHERNET/if_defs.h
+index 9e5ec68..80227b4 100644
+--- a/radio/ETHERNET/if_defs.h
++++ b/radio/ETHERNET/if_defs.h
+@@ -5,7 +5,11 @@
+ #ifndef __ETHERNET_USERSPACE_LIB_IF_DEFS__H__
+ #define __ETHERNET_USERSPACE_LIB_IF_DEFS__H__
+ 
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <stdint.h>
+ 
+ #ifndef LITE_COMPILATION
+diff --git a/radio/LMSSDR/lms_lib.cpp b/radio/LMSSDR/lms_lib.cpp
+index 1e20fcb..a193c09 100644
+--- a/radio/LMSSDR/lms_lib.cpp
++++ b/radio/LMSSDR/lms_lib.cpp
+@@ -3,14 +3,20 @@
+  */
+ 
+ #include <arpa/inet.h>
++#ifdef __linux__
+ #include <linux/if_packet.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <net/if.h>
++#ifdef __APPLE__
++#include <net/ethernet.h> /* struct ether_header, ether_aton() */
++#else
+ #include <netinet/ether.h>
++#endif
+ #include <unistd.h>
+ #include <errno.h>
+ 
+-- 
+2.55.0
+

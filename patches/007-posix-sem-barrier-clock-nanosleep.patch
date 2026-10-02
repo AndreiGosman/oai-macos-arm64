@@ -1,0 +1,389 @@
+From 5d53a5b2a145b6d10972a13303e310bed0a8031b Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:26:33 +0300
+Subject: [PATCH] utils: barriers, semaphores and absolute sleeps without glibc
+
+Three POSIX interfaces used on the critical path of every executor do
+not exist on Darwin:
+
+  pthread_barrier_t      thread pool start-up synchronisation
+  sem_init()             declared, returns ENOSYS; task_ans and the ITTI
+                         shutdown wait use it
+  clock_nanosleep()      rt_sleep_ns() and the realtime time source,
+                         both with TIMER_ABSTIME
+
+  system.c:198:10: error: call to undeclared function 'clock_nanosleep'
+  system.c:198:43: error: use of undeclared identifier 'TIMER_ABSTIME'
+  task_ans.c:40:3: warning: 'sem_init' is deprecated
+
+Add common/utils/oai_sem.h, a counting semaphore that is sem_t where
+sem_init() works and a libdispatch semaphore on Darwin, and switch the
+two users to it. Add common/utils/darwin_compat.h, empty outside
+Darwin, with pthread_barrier_* over a mutex, a condition variable and a
+generation counter, and clock_nanosleep() over nanosleep() with the
+absolute deadline converted against the requested clock; it returns the
+error number like the Linux call so that a caller retrying on EINTR
+recomputes the interval from the same deadline. Include it from the
+thread pool header, system.c and time_source.c.
+---
+ common/utils/darwin_compat.h                  | 108 ++++++++++++++++++
+ common/utils/oai_sem.h                        |  92 +++++++++++++++
+ common/utils/ocp_itti/intertask_interface.cpp |  10 +-
+ common/utils/system.c                         |   1 +
+ common/utils/threadPool/task_ans.c            |   8 +-
+ common/utils/threadPool/task_ans.h            |   5 +-
+ common/utils/threadPool/thread-pool.h         |   1 +
+ common/utils/time_manager/time_source.c       |   1 +
+ 8 files changed, 215 insertions(+), 11 deletions(-)
+ create mode 100644 common/utils/darwin_compat.h
+ create mode 100644 common/utils/oai_sem.h
+
+diff --git a/common/utils/darwin_compat.h b/common/utils/darwin_compat.h
+new file mode 100644
+index 0000000..a97f7d2
+--- /dev/null
++++ b/common/utils/darwin_compat.h
+@@ -0,0 +1,108 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++/* POSIX interfaces that Darwin does not provide: pthread barriers and
++ * clock_nanosleep(). Empty on every other platform. */
++
++#ifndef OAI_DARWIN_COMPAT_H
++#define OAI_DARWIN_COMPAT_H
++
++#ifdef __APPLE__
++
++#include <errno.h>
++#include <pthread.h>
++#include <time.h>
++
++/* pthread_barrier_* over a mutex, a condition variable and a generation
++ * counter, with the POSIX return values. */
++
++typedef struct {
++  int unused;
++} pthread_barrierattr_t;
++
++typedef struct {
++  pthread_mutex_t mutex;
++  pthread_cond_t cond;
++  unsigned int count;
++  unsigned int waiting;
++  unsigned int generation;
++} pthread_barrier_t;
++
++#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
++
++static inline int pthread_barrier_init(pthread_barrier_t *b, const pthread_barrierattr_t *attr, unsigned int count)
++{
++  (void)attr;
++  if (count == 0)
++    return EINVAL;
++  b->count = count;
++  b->waiting = 0;
++  b->generation = 0;
++  int ret = pthread_mutex_init(&b->mutex, NULL);
++  if (ret != 0)
++    return ret;
++  ret = pthread_cond_init(&b->cond, NULL);
++  if (ret != 0)
++    pthread_mutex_destroy(&b->mutex);
++  return ret;
++}
++
++static inline int pthread_barrier_wait(pthread_barrier_t *b)
++{
++  pthread_mutex_lock(&b->mutex);
++  unsigned int generation = b->generation;
++  if (++b->waiting == b->count) {
++    b->waiting = 0;
++    b->generation++;
++    pthread_cond_broadcast(&b->cond);
++    pthread_mutex_unlock(&b->mutex);
++    return PTHREAD_BARRIER_SERIAL_THREAD;
++  }
++  while (generation == b->generation)
++    pthread_cond_wait(&b->cond, &b->mutex);
++  pthread_mutex_unlock(&b->mutex);
++  return 0;
++}
++
++static inline int pthread_barrier_destroy(pthread_barrier_t *b)
++{
++  int ret = pthread_cond_destroy(&b->cond);
++  int ret2 = pthread_mutex_destroy(&b->mutex);
++  return ret != 0 ? ret : ret2;
++}
++
++/* clock_nanosleep() with TIMER_ABSTIME. Darwin only has nanosleep(), which
++ * takes a relative interval: convert against the requested clock. Returns
++ * the error number like the Linux call, so a caller that retries on EINTR
++ * recomputes the interval from the same deadline. */
++
++#ifndef TIMER_ABSTIME
++#define TIMER_ABSTIME 1
++#endif
++
++static inline int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *req, struct timespec *rem)
++{
++  struct timespec delta = *req;
++  if (flags & TIMER_ABSTIME) {
++    struct timespec now;
++    if (clock_gettime(clock_id, &now) != 0)
++      return errno;
++    delta.tv_sec = req->tv_sec - now.tv_sec;
++    delta.tv_nsec = req->tv_nsec - now.tv_nsec;
++    if (delta.tv_nsec < 0) {
++      delta.tv_nsec += 1000000000L;
++      delta.tv_sec--;
++    }
++    if (delta.tv_sec < 0)
++      return 0;
++    rem = NULL;
++  }
++  if (nanosleep(&delta, rem) != 0)
++    return errno;
++  return 0;
++}
++
++#endif /* __APPLE__ */
++
++#endif /* OAI_DARWIN_COMPAT_H */
+diff --git a/common/utils/oai_sem.h b/common/utils/oai_sem.h
+new file mode 100644
+index 0000000..b0b02b9
+--- /dev/null
++++ b/common/utils/oai_sem.h
+@@ -0,0 +1,92 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++/* Counting semaphore. POSIX sem_t where sem_init() works; Darwin declares
++ * sem_init() but returns ENOSYS, so it uses a mutex and a condition variable. */
++
++#ifndef OAI_SEM_H
++#define OAI_SEM_H
++
++#ifdef __APPLE__
++
++/* Darwin declares sem_init() but returns ENOSYS. A counting semaphore over
++ * a mutex and a condition variable; libdispatch would do, but its headers
++ * bring the Mach time_value_t into every holder of this header, which
++ * clashes with the time_value_t of common/utils/time_stat.h. */
++
++#include <pthread.h>
++
++typedef struct {
++  pthread_mutex_t mutex;
++  pthread_cond_t cond;
++  unsigned int count;
++} oai_sem_t;
++
++static inline int oai_sem_init(oai_sem_t *s, unsigned int value)
++{
++  s->count = value;
++  int ret = pthread_mutex_init(&s->mutex, NULL);
++  if (ret != 0)
++    return ret;
++  ret = pthread_cond_init(&s->cond, NULL);
++  if (ret != 0)
++    pthread_mutex_destroy(&s->mutex);
++  return ret;
++}
++
++static inline int oai_sem_post(oai_sem_t *s)
++{
++  pthread_mutex_lock(&s->mutex);
++  s->count++;
++  pthread_cond_signal(&s->cond);
++  pthread_mutex_unlock(&s->mutex);
++  return 0;
++}
++
++static inline int oai_sem_wait(oai_sem_t *s)
++{
++  pthread_mutex_lock(&s->mutex);
++  while (s->count == 0)
++    pthread_cond_wait(&s->cond, &s->mutex);
++  s->count--;
++  pthread_mutex_unlock(&s->mutex);
++  return 0;
++}
++
++static inline int oai_sem_destroy(oai_sem_t *s)
++{
++  int ret = pthread_cond_destroy(&s->cond);
++  int ret2 = pthread_mutex_destroy(&s->mutex);
++  return ret != 0 ? ret : ret2;
++}
++
++#else /* POSIX */
++
++#include <semaphore.h>
++
++typedef sem_t oai_sem_t;
++
++static inline int oai_sem_init(oai_sem_t *s, unsigned int value)
++{
++  return sem_init(s, 0, value);
++}
++
++static inline int oai_sem_post(oai_sem_t *s)
++{
++  return sem_post(s);
++}
++
++static inline int oai_sem_wait(oai_sem_t *s)
++{
++  return sem_wait(s);
++}
++
++static inline int oai_sem_destroy(oai_sem_t *s)
++{
++  return sem_destroy(s);
++}
++
++#endif
++
++#endif /* OAI_SEM_H */
+diff --git a/common/utils/ocp_itti/intertask_interface.cpp b/common/utils/ocp_itti/intertask_interface.cpp
+index 11888a7..0395c0c 100644
+--- a/common/utils/ocp_itti/intertask_interface.cpp
++++ b/common/utils/ocp_itti/intertask_interface.cpp
+@@ -5,7 +5,7 @@
+ #include <vector>
+ #include <map>
+ #include <sys/eventfd.h>
+-#include <semaphore.h>
++#include "common/utils/oai_sem.h"
+ 
+ 
+ extern "C" {
+@@ -429,10 +429,10 @@ typedef struct timer_elm_s {
+   void itti_send_terminate_message(task_id_t task_id) {
+   }
+ 
+-  static sem_t itti_sem_block;
++  static oai_sem_t itti_sem_block;
+   void itti_wait_tasks_unblock()
+   {
+-    int rc = sem_post(&itti_sem_block);
++    int rc = oai_sem_post(&itti_sem_block);
+     AssertFatal(rc == 0, "error in sem_post(): %d %s\n", errno, strerror(errno));
+   }
+ 
+@@ -445,7 +445,7 @@ typedef struct timer_elm_s {
+ 
+   void itti_wait_tasks_end(void (*handler)(int))
+   {
+-    int rc = sem_init(&itti_sem_block, 0, 0);
++    int rc = oai_sem_init(&itti_sem_block, 0);
+     AssertFatal(rc == 0, "error in sem_init(): %d %s\n", errno, strerror(errno));
+ 
+     if (handler == NULL) /* no handler given: install default */
+@@ -453,7 +453,7 @@ typedef struct timer_elm_s {
+     signal(SIGTERM, handler);
+     signal(SIGINT, handler);
+ 
+-    rc = sem_wait(&itti_sem_block);
++    rc = oai_sem_wait(&itti_sem_block);
+     AssertFatal(rc == 0, "error in sem_wait(): %d %s\n", errno, strerror(errno));
+   }
+ 
+diff --git a/common/utils/system.c b/common/utils/system.c
+index 9452087..af07288 100644
+--- a/common/utils/system.c
++++ b/common/utils/system.c
+@@ -13,6 +13,7 @@
+ 
+ #define _GNU_SOURCE
+ #include "system.h"
++#include "common/utils/darwin_compat.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdbool.h>
+diff --git a/common/utils/threadPool/task_ans.c b/common/utils/threadPool/task_ans.c
+index 7e0bf91..b02417d 100644
+--- a/common/utils/threadPool/task_ans.c
++++ b/common/utils/threadPool/task_ans.c
+@@ -15,22 +15,22 @@
+ 
+ #define seminit(sem)                                                                           \
+   {                                                                                            \
+-    int ret = sem_init(&sem, 0, 0);                                                            \
++    int ret = oai_sem_init(&sem, 0);                                                            \
+     AssertFatal(ret == 0, "sem_init(): ret=%d, errno=%d (%s)\n", ret, errno, strerror(errno)); \
+   }
+ #define sempost(sem)                                                                           \
+   {                                                                                            \
+-    int ret = sem_post(&sem);                                                                  \
++    int ret = oai_sem_post(&sem);                                                                  \
+     AssertFatal(ret == 0, "sem_post(): ret=%d, errno=%d (%s)\n", ret, errno, strerror(errno)); \
+   }
+ #define semwait(sem)                                                                           \
+   {                                                                                            \
+-    int ret = sem_wait(&sem);                                                                  \
++    int ret = oai_sem_wait(&sem);                                                                  \
+     AssertFatal(ret == 0, "sem_wait(): ret=%d, errno=%d (%s)\n", ret, errno, strerror(errno)); \
+   }
+ #define semdestroy(sem)                                                                           \
+   {                                                                                               \
+-    int ret = sem_destroy(&sem);                                                                  \
++    int ret = oai_sem_destroy(&sem);                                                                  \
+     AssertFatal(ret == 0, "sem_destroy(): ret=%d, errno=%d (%s)\n", ret, errno, strerror(errno)); \
+   }
+ 
+diff --git a/common/utils/threadPool/task_ans.h b/common/utils/threadPool/task_ans.h
+index b20da35..fcb411a 100644
+--- a/common/utils/threadPool/task_ans.h
++++ b/common/utils/threadPool/task_ans.h
+@@ -22,7 +22,8 @@ extern "C" {
+ 
+ #include <stddef.h>
+ #include <stdint.h>
+-#include <semaphore.h>
++#include <sys/types.h> /* uint */
++#include "common/utils/oai_sem.h"
+ 
+ #if defined(__i386__) || defined(__x86_64__)
+ #define LEVEL1_DCACHE_LINESIZE 64
+@@ -45,7 +46,7 @@ extern "C" {
+  * is used for efficiency under contention.
+  */
+ typedef struct {
+-  sem_t sem;
++  oai_sem_t sem;
+   _Alignas(LEVEL1_DCACHE_LINESIZE) _Atomic(int) counter;
+ } task_ans_t;
+ 
+diff --git a/common/utils/threadPool/thread-pool.h b/common/utils/threadPool/thread-pool.h
+index 88b1c56..71fbfc0 100644
+--- a/common/utils/threadPool/thread-pool.h
++++ b/common/utils/threadPool/thread-pool.h
+@@ -9,6 +9,7 @@
+ #include <stdlib.h>
+ #include <stdalign.h>
+ #include <pthread.h>
++#include "common/utils/darwin_compat.h"
+ #include <unistd.h>
+ #include <string.h>
+ #include <sys/syscall.h>
+diff --git a/common/utils/time_manager/time_source.c b/common/utils/time_manager/time_source.c
+index 0b6f79e..2729af7 100644
+--- a/common/utils/time_manager/time_source.c
++++ b/common/utils/time_manager/time_source.c
+@@ -11,6 +11,7 @@
+ 
+ #include "common/utils/assertions.h"
+ #include "common/utils/system.h"
++#include "common/utils/darwin_compat.h"
+ #include "common/utils/utils.h"
+ 
+ typedef void (*callback_function_t)(void *callback_data);
+-- 
+2.55.0
+

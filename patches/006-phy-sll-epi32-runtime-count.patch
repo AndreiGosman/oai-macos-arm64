@@ -1,0 +1,77 @@
+From aa0dcc2d653951241d2e68d6b01b73389fc457ae Mon Sep 17 00:00:00 2001
+From: Andrei Gosman <andrei.gosman@gmail.com>
+Date: Fri, 2 Oct 2026 14:23:27 +0300
+Subject: [PATCH] phy: shift by a run-time count with sll_epi32, not slli_epi32
+
+_mm_slli_epi32() and _mm256_slli_epi32() take an immediate count. The
+x86 compilers tolerate a run-time value there and fall back to the
+register form of the instruction, which is why five call sites pass a
+variable (16 - shift in the complex multiply helpers of tools_defs.h,
+-b in the LLR normalisation of nr_compute_llr.c). On AArch64 through
+SIMDe the immediate form maps to vshlq_n_s32(), whose count must be a
+compile-time constant; GCC checks that after inlining and constant
+propagation, so the aarch64 CI passes, clang checks it when parsing:
+
+  tools_defs.h:424:68: error: argument to '__builtin_neon_vshlq_n_v'
+  must be a constant integer
+
+The register-count intrinsic _mm_sll_epi32() with _mm_cvtsi32_si128()
+is the form the x86 compilers were already generating for these sites
+and has the same semantics for every count, including negative and out
+of range ones (result zero). SIMDe implements it without an immediate
+on every backend. The arithmetic right shifts (srai) are unaffected:
+SIMDe implements those as functions with a run-time count.
+---
+ openair1/PHY/TOOLS/tools_defs.h                 | 4 ++--
+ openair1/PHY/nr_phy_common/src/nr_compute_llr.c | 6 +++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/openair1/PHY/TOOLS/tools_defs.h b/openair1/PHY/TOOLS/tools_defs.h
+index a9de55a..b785ac3 100644
+--- a/openair1/PHY/TOOLS/tools_defs.h
++++ b/openair1/PHY/TOOLS/tools_defs.h
+@@ -421,7 +421,7 @@ static __attribute__((always_inline)) inline void mult_complex_vectors(const c16
+     const simde__m256i im = simde_mm256_madd_epi16(i1, i2swap);
+     simde_mm256_storeu_si256(
+         (simde__m256i *)(out + i),
+-        simde_mm256_blend_epi16(simde_mm256_srai_epi32(re, shift), simde_mm256_slli_epi32(im, 16 - shift), 0xAA));
++        simde_mm256_blend_epi16(simde_mm256_srai_epi32(re, shift), simde_mm256_sll_epi32(im, simde_mm_cvtsi32_si128(16 - shift)), 0xAA));
+   }
+   if (size - i > 4) {
+     const simde__m128i i1 = simde_mm_loadu_si128((simde__m128i *)(in1 + i));
+@@ -431,7 +431,7 @@ static __attribute__((always_inline)) inline void mult_complex_vectors(const c16
+     const simde__m128i re = simde_mm_madd_epi16(i1, i2conj);
+     const simde__m128i im = simde_mm_madd_epi16(i1, i2swap);
+     simde_mm_storeu_si128((simde__m128i *)(out + i),
+-                          simde_mm_blend_epi16(simde_mm_srai_epi32(re, shift), simde_mm_slli_epi32(im, 16 - shift), 0xAA));
++                          simde_mm_blend_epi16(simde_mm_srai_epi32(re, shift), simde_mm_sll_epi32(im, simde_mm_cvtsi32_si128(16 - shift)), 0xAA));
+     i += 4;
+   }
+   for (; i < size; i++)
+diff --git a/openair1/PHY/nr_phy_common/src/nr_compute_llr.c b/openair1/PHY/nr_phy_common/src/nr_compute_llr.c
+index 21e1ffb..c336fc2 100644
+--- a/openair1/PHY/nr_phy_common/src/nr_compute_llr.c
++++ b/openair1/PHY/nr_phy_common/src/nr_compute_llr.c
+@@ -2621,8 +2621,8 @@ static simde__m128i nr_comp_muli_sum(simde__m128i input_x,
+     xy_re_128 = simde_mm_srai_epi32(xy_re_128, b);
+     xy_im_128 = simde_mm_srai_epi32(xy_im_128, b);
+   } else {
+-    xy_re_128 = simde_mm_slli_epi32(xy_re_128, -b);
+-    xy_im_128 = simde_mm_slli_epi32(xy_im_128, -b);
++    xy_re_128 = simde_mm_sll_epi32(xy_re_128, simde_mm_cvtsi32_si128(-b));
++    xy_im_128 = simde_mm_sll_epi32(xy_im_128, simde_mm_cvtsi32_si128(-b));
+   }
+ 
+   simde__m128i output = oai_mm_pack(xy_re_128, xy_im_128);
+@@ -3004,7 +3004,7 @@ uint8_t nr_mmse_2layers(c16_t **rxdataF_comp,
+       if (b > 0) {
+         mmtmpD2 = simde_mm_srai_epi32(determ_fin_128[0], b);
+       } else {
+-        mmtmpD2 = simde_mm_slli_epi32(determ_fin_128[0], -b);
++        mmtmpD2 = simde_mm_sll_epi32(determ_fin_128[0], simde_mm_cvtsi32_si128(-b));
+       }
+       mmtmpD3 = simde_mm_unpacklo_epi32(mmtmpD2, mmtmpD2);
+       mmtmpD2 = simde_mm_unpackhi_epi32(mmtmpD2, mmtmpD2);
+-- 
+2.55.0
+
